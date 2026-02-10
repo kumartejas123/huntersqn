@@ -10,7 +10,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-        import { getFirestore, doc, getDoc, setDoc, updateDoc, increment, collection, query, orderBy, limit, onSnapshot, where, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, increment, collection, query, orderBy, limit, onSnapshot, where, getDocs, arrayUnion, arrayRemove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
         const firebaseConfig = {
           apiKey: "AIzaSyCg9iZLxNhlPlHmY3er27HNIVOgQ0H4qcI",
@@ -26,6 +26,15 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
 
+        // --- BATTLE COMMS (TOASTS) ---
+        window.showToast = (msg, type = 'info') => {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.className = `fixed top-10 left-1/2 -translate-x-1/2 z-[500] px-6 py-3 rounded-full font-bold text-xs uppercase tracking-widest shadow-2xl transition-all duration-500 ${type === 'err' ? 'bg-red-600 text-white' : 'bg-orange-600 text-white'}`;
+            toast.style.opacity = '1';
+            setTimeout(() => toast.style.opacity = '0', 3000);
+        };
+
         // --- AUTHENTICATION LOGIC ---
         const loginForm = document.getElementById('login-form');
         loginForm.onsubmit = async (e) => {
@@ -35,17 +44,18 @@
             
             try {
                 await signInWithEmailAndPassword(auth, email, password);
+                showToast("Authentication Successful. Welcome back.");
             } catch (error) {
                 if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found') {
                     const register = confirm("Cadet not found. Would you like to register this account?");
                     if (register) {
                         try {
                             await createUserWithEmailAndPassword(auth, email, password);
-                            alert("Welcome to the Squadron, Cadet!");
-                        } catch (regErr) { alert("Registration error: " + regErr.message); }
+                            showToast("Welcome to the Squadron, Cadet!", 'success');
+                        } catch (regErr) { showToast("Registration error: " + regErr.message, 'err'); }
                     }
                 } else {
-                    alert("Auth Error: " + error.message);
+                    showToast("Auth Error: " + error.message, 'err');
                 }
             }
         };
@@ -63,28 +73,55 @@
         });
 
         // --- DATABASE, TIMER & ANALYTICS ---
-        let totalSec = 0, running = false, timerInterval;
+        let totalSec = 0, sessionSec = 0, running = false, timerInterval;
+        let isPomodoro = false, pomoTime = 1500; // 25 mins
         const DAILY_GOAL_HOURS = 6; 
+
+        // 5 AM RESET LOGIC
+        function getSquadronDate() {
+            const now = new Date();
+            const hour = now.getHours();
+            const resetDate = new Date(now);
+            if (hour < 5) resetDate.setDate(now.getDate() - 1);
+            return resetDate.toISOString().split('T')[0];
+        }
 
         async function setupUserSession(user) {
             const userRef = doc(db, "users", user.uid);
             const userSnap = await getDoc(userRef);
+            const currentDate = getSquadronDate();
+
             if (!userSnap.exists()) {
                 await setDoc(userRef, { 
                     name: user.email.split('@')[0], 
                     totalStudyTime: 0, 
                     isPremium: false,
-                    lastStudyDate: new Date().toISOString().split('T')[0]
+                    lastStudyDate: currentDate,
+                    subjectStats: {},
+                    dailyTodos: []
                 });
             } else {
                 const data = userSnap.data();
-                totalSec = data.totalStudyTime || 0;
+                // Check if we need to reset for a new day (at 5 AM)
+                if (data.lastStudyDate !== currentDate) {
+                    await updateDoc(userRef, {
+                        totalStudyTime: 0,
+                        lastStudyDate: currentDate,
+                        dailyTodos: [] // Clear todos for new day
+                    });
+                    totalSec = 0;
+                } else {
+                    totalSec = data.totalStudyTime || 0;
+                }
+
                 if (data.isPremium) {
                     window.isPremiumUser = true;
                     unlockPremiumUI();
                 }
                 updateTimerDisplay();
                 updateAnalyticsDisplay(totalSec);
+                renderSubjectStats(data.subjectStats || {});
+                renderTodos(data.dailyTodos || []);
             }
         }
 
@@ -96,41 +133,82 @@
             document.getElementById('premium-btn').classList.remove('cursor-not-allowed');
         }
 
+        // IMPROVED TIMER LOGIC (YPT STYLE)
         window.toggleTimer = async () => {
             const btn = document.getElementById('timerBtn');
+            const warBtn = document.getElementById('warRoomBtn');
             const dot = document.getElementById('timer-dot');
+            const missionSubject = document.getElementById('mission-select').value;
+            
             if(!running) {
                 running = true;
+                sessionSec = 0;
                 btn.classList.replace('bg-slate-900', 'bg-orange-600');
+                warBtn.classList.replace('bg-orange-600', 'bg-red-600');
+                warBtn.innerText = "ABORT MISSION";
                 dot.classList.add('animate-ping');
+                document.getElementById('radar').classList.add('radar-active');
+                document.getElementById('active-mission-title').innerText = missionSubject;
+                
+                showToast(`Mission: ${missionSubject} Engaged`);
+                
                 timerInterval = setInterval(() => { 
                     totalSec++; 
+                    sessionSec++;
+                    if(isPomodoro && pomoTime > 0) pomoTime--;
                     updateTimerDisplay(); 
                     if (totalSec % 60 === 0) saveProgress(); 
                 }, 1000);
             } else {
                 running = false;
                 btn.classList.replace('bg-orange-600', 'bg-slate-900');
+                warBtn.classList.replace('bg-red-600', 'bg-orange-600');
+                warBtn.innerText = "ENGAGE MISSION";
                 dot.classList.remove('animate-ping');
+                document.getElementById('radar').classList.remove('radar-active');
                 clearInterval(timerInterval);
                 saveProgress();
+                showToast("Mission Paused. Data Linked to HQ.");
             }
         };
 
+        window.toggleMode = () => {
+            isPomodoro = !isPomodoro;
+            document.getElementById('mode-indicator').innerText = isPomodoro ? "POMODORO MODE" : "CONTINUOUS MODE";
+            showToast(`Switched to ${isPomodoro ? 'Pomodoro' : 'Continuous'} Mode`);
+        }
+
         async function saveProgress() {
             const user = auth.currentUser;
+            const missionSubject = document.getElementById('mission-select').value.replace(/[:.]/g, ''); // Sanitize key
             if (user) {
-                await updateDoc(doc(db, "users", user.uid), { 
+                const userRef = doc(db, "users", user.uid);
+                const updateObj = { 
                     totalStudyTime: totalSec,
                     lastActive: new Date()
-                });
+                };
+                // Increment specific subject time
+                updateObj[`subjectStats.${missionSubject}`] = increment(sessionSec);
+                
+                await updateDoc(userRef, updateObj);
+                sessionSec = 0; // Reset session counter after saving to subject stats
                 updateAnalyticsDisplay(totalSec);
+                
+                // Refresh local UI stats
+                const freshSnap = await getDoc(userRef);
+                renderSubjectStats(freshSnap.data().subjectStats || {});
             }
         }
 
         function updateTimerDisplay() {
             const h = Math.floor(totalSec/3600), m = Math.floor((totalSec%3600)/60), s = totalSec%60;
-            document.getElementById('timer-display').innerText = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+            const sh = Math.floor(sessionSec/3600), sm = Math.floor((sessionSec%3600)/60), ss = sessionSec%60;
+            const timeStr = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+            const sessionStr = `${sh.toString().padStart(2,'0')}:${sm.toString().padStart(2,'0')}:${ss.toString().padStart(2,'0')}`;
+            
+            document.getElementById('timer-display').innerText = timeStr;
+            document.getElementById('war-total-display').innerText = timeStr;
+            document.getElementById('war-session-display').innerText = sessionStr;
         }
 
         function updateAnalyticsDisplay(seconds) {
@@ -140,19 +218,93 @@
             document.getElementById('daily-progress-text').innerText = `${percentage.toFixed(0)}% of Daily Goal`;
         }
 
+        function renderSubjectStats(stats) {
+            const container = document.getElementById('subject-intel-list');
+            if(!container) return;
+            container.innerHTML = "";
+            for (const [subject, sec] of Object.entries(stats)) {
+                const hrs = (sec / 3600).toFixed(1);
+                container.innerHTML += `
+                    <div class="flex justify-between items-center bg-slate-900 p-3 rounded-xl border border-slate-800">
+                        <span class="text-[10px] font-bold text-slate-400 uppercase">${subject}</span>
+                        <span class="text-xs font-black text-orange-500">${hrs}h</span>
+                    </div>`;
+            }
+        }
+
+        // TODO LIST LOGIC
+        window.addTask = async () => {
+            const input = document.getElementById('todo-input');
+            const task = input.value.trim();
+            if (!task) return;
+            const user = auth.currentUser;
+            if (user) {
+                await updateDoc(doc(db, "users", user.uid), {
+                    dailyTodos: arrayUnion({ id: Date.now(), text: task, completed: false })
+                });
+                input.value = "";
+                const snap = await getDoc(doc(db, "users", user.uid));
+                renderTodos(snap.data().dailyTodos);
+            }
+        };
+
+        window.toggleTask = async (id) => {
+            const user = auth.currentUser;
+            const userRef = doc(db, "users", user.uid);
+            const snap = await getDoc(userRef);
+            const todos = snap.data().dailyTodos.map(t => {
+                if (t.id === id) t.completed = !t.completed;
+                return t;
+            });
+            await updateDoc(userRef, { dailyTodos: todos });
+            renderTodos(todos);
+        };
+
+        function renderTodos(todos) {
+            const container = document.getElementById('todo-list');
+            if(!container) return;
+            container.innerHTML = "";
+            todos.forEach(t => {
+                container.innerHTML += `
+                    <div onclick="toggleTask(${t.id})" class="flex items-center gap-3 p-3 bg-slate-900 rounded-xl border border-slate-800 cursor-pointer hover:border-orange-500 transition">
+                        <div class="w-4 h-4 border-2 border-orange-500 rounded flex items-center justify-center">
+                            ${t.completed ? '<div class="w-2 h-2 bg-orange-500"></div>' : ''}
+                        </div>
+                        <span class="text-xs font-bold ${t.completed ? 'text-slate-600 line-through' : 'text-slate-300'}">${t.text}</span>
+                    </div>`;
+            });
+        }
+
+        function getRank(hours) {
+            if (hours > 500) return "General";
+            if (hours > 200) return "Colonel";
+            if (hours > 100) return "Major";
+            if (hours > 50) return "Captain";
+            return "Cadet";
+        }
+
         function loadMeritList() {
             const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
             onSnapshot(q, (snapshot) => {
                 const meritDiv = document.getElementById('merit-list-content');
+                const warMeritDiv = document.getElementById('war-squad-list');
                 meritDiv.innerHTML = "";
+                if(warMeritDiv) warMeritDiv.innerHTML = "";
                 let i = 1;
                 snapshot.forEach((doc) => {
                     const data = doc.data();
-                    meritDiv.innerHTML += `
-                        <div class="flex items-center justify-between p-3 bg-white border rounded-xl">
-                            <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
-                            <span class="text-[10px] font-mono font-black text-orange-600 italic">${(data.totalStudyTime/3600).toFixed(1)}h</span>
+                    const hours = (data.totalStudyTime/3600);
+                    const rank = getRank(hours);
+                    const html = `
+                        <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
+                            <div class="flex flex-col">
+                                <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rank}</span>
+                                <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
+                            </div>
+                            <span class="text-[10px] font-mono font-black text-slate-400 italic">${hours.toFixed(1)}h</span>
                         </div>`;
+                    meritDiv.innerHTML += html;
+                    if(warMeritDiv) warMeritDiv.innerHTML += html.replace('bg-white', 'bg-slate-950').replace('text-slate-600', 'text-slate-400');
                 });
             });
         }
@@ -160,10 +312,10 @@
         window.adminUpgrade = async (targetEmail) => {
             const q = query(collection(db, "users"), where("name", "==", targetEmail.split('@')[0]));
             const querySnapshot = await getDocs(q);
-            if(querySnapshot.empty) { console.log("User not found."); return; }
+            if(querySnapshot.empty) { showToast("User not found.", "err"); return; }
             querySnapshot.forEach(async (d) => {
                  await updateDoc(doc(db, "users", d.id), { isPremium: true });
-                 console.log(`Upgraded ${d.data().name} to Elite.`);
+                 showToast(`Upgraded ${d.data().name} to Elite.`);
             });
         }
     </script>
@@ -177,9 +329,30 @@
         .breadcrumb:hover { text-decoration: underline; cursor: pointer; color: #f97316; }
         ::-webkit-scrollbar { width: 5px; }
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+        #toast { pointer-events: none; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); opacity: 0; }
+        
+        /* WAR ROOM RADAR ANIMATION */
+        .radar-active {
+            position: relative;
+        }
+        .radar-active::before {
+            content: '';
+            position: absolute;
+            inset: -20px;
+            border: 2px solid #f97316;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+            opacity: 0;
+        }
+        @keyframes pulse {
+            0% { transform: scale(0.8); opacity: 0.5; }
+            100% { transform: scale(1.5); opacity: 0; }
+        }
     </style>
 </head>
 <body class="text-slate-800 flex flex-col h-screen">
+
+    <div id="toast"></div>
 
     <div id="login-screen" class="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-50">
         <div class="bg-white p-10 rounded-3xl shadow-2xl w-full max-w-md border border-slate-100">
@@ -197,8 +370,9 @@
         <div class="flex items-center gap-8">
             <span class="font-black text-2xl italic text-orange-600 tracking-tighter">HUNTER SQUADRON</span>
             <div class="flex bg-slate-100 p-1 rounded-xl text-[11px] font-black border uppercase tracking-tighter">
-                <button id="btn-free" onclick="switchTab('free')" class="px-6 py-2 rounded-lg tab-active transition-all">Free Bunker</button>
-                <button id="btn-paid" onclick="switchTab('paid')" class="px-6 py-2 rounded-lg text-slate-500 transition-all">Elite Arsenal</button>
+                <button id="btn-free" onclick="switchTab('free')" class="px-6 py-2 rounded-lg tab-active transition-all">Vault</button>
+                <button id="btn-war" onclick="switchTab('war')" class="px-6 py-2 rounded-lg text-slate-500 transition-all">War Room</button>
+                <button id="btn-paid" onclick="switchTab('paid')" class="px-6 py-2 rounded-lg text-slate-500 transition-all">Arsenal</button>
             </div>
         </div>
         <div class="flex items-center gap-6">
@@ -208,19 +382,70 @@
     </nav>
 
     <div id="dashboard" class="flex-1 flex overflow-hidden">
-        <aside class="w-72 bg-white border-r hidden lg:flex flex-col">
+        <aside id="main-sidebar" class="w-72 bg-white border-r hidden lg:flex flex-col">
             <div class="p-6 border-b"><h2 class="font-black text-xs uppercase tracking-widest text-slate-400">Merit List (Live)</h2></div>
             <div id="merit-list-content" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/30"></div>
         </aside>
 
         <main class="flex-1 flex flex-col bg-white overflow-hidden relative">
-            <div class="px-8 py-3 bg-slate-50/50 border-b text-[9px] font-black text-slate-400 flex gap-2 items-center tracking-[0.2em] uppercase">
-                <span onclick="goHome()" class="breadcrumb text-orange-600">Home</span>
-                <span id="bc-exam-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-exam"></span></span>
-                <span id="bc-subject-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-subject"></span></span>
+            <div class="px-8 py-3 bg-slate-50/50 border-b text-[9px] font-black text-slate-400 flex justify-between items-center tracking-[0.2em] uppercase">
+                <div id="breadcrumb-area">
+                    <span onclick="goHome()" class="breadcrumb text-orange-600">Home</span>
+                    <span id="bc-exam-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-exam"></span></span>
+                    <span id="bc-subject-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-subject"></span></span>
+                </div>
+                <button onclick="toggleMode()" id="mode-indicator" class="text-orange-600 font-black hover:underline cursor-pointer">Continuous Mode</button>
             </div>
 
-            <div class="flex-1 overflow-y-auto p-8 pb-32">
+            <div id="view-war" class="hidden flex-1 overflow-hidden flex flex-col lg:flex-row bg-slate-950">
+                <div class="w-full lg:w-80 bg-slate-900 border-r border-slate-800 p-6 overflow-y-auto flex flex-col gap-8">
+                    <section>
+                        <h3 class="text-[10px] font-black text-orange-500 uppercase tracking-widest mb-4">Tactical Objectives</h3>
+                        <div class="flex gap-2 mb-4">
+                            <input id="todo-input" type="text" placeholder="Add Objective" class="flex-1 bg-slate-800 border-none rounded-lg p-2 text-xs text-white outline-none focus:ring-1 focus:ring-orange-500">
+                            <button onclick="addTask()" class="bg-orange-600 text-white px-3 rounded-lg font-bold text-lg">+</button>
+                        </div>
+                        <div id="todo-list" class="space-y-2"></div>
+                    </section>
+                    
+                    <section>
+                        <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4">Subject Intelligence</h3>
+                        <div id="subject-intel-list" class="space-y-2"></div>
+                    </section>
+                </div>
+
+                <div class="flex-1 p-8 flex flex-col items-center justify-center text-center space-y-8">
+                    <div id="radar" class="w-64 h-64 rounded-full border-4 border-slate-800 flex flex-col items-center justify-center bg-slate-900 shadow-[0_0_50px_rgba(249,115,22,0.1)]">
+                        <span id="war-session-display" class="text-5xl font-mono font-black text-white tracking-tighter">00:00:00</span>
+                        <span class="text-[10px] text-orange-500 font-black uppercase tracking-widest mt-2">Current Session</span>
+                    </div>
+
+                    <div class="space-y-2">
+                        <h2 id="active-mission-title" class="text-2xl font-black text-white italic uppercase tracking-tighter">Mission Standby</h2>
+                        <div class="flex gap-4 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                            <span>Daily Total: <span id="war-total-display" class="text-white">00:00:00</span></span>
+                        </div>
+                    </div>
+
+                    <div class="w-full max-w-xs space-y-4">
+                        <select id="mission-select" class="w-full bg-slate-900 border border-slate-700 text-white p-4 rounded-2xl font-bold text-xs outline-none focus:border-orange-500">
+                            <option>Mathematics Mission</option>
+                            <option>GAT Science Mission</option>
+                            <option>GAT HistoryGeo Mission</option>
+                            <option>English Proficiency</option>
+                            <option>Mock Test Drill</option>
+                        </select>
+                        <button id="warRoomBtn" onclick="toggleTimer()" class="w-full bg-orange-600 text-white p-5 rounded-2xl font-black uppercase text-xs tracking-[0.2em] shadow-xl hover:scale-105 transition-all">Engage Mission</button>
+                    </div>
+                </div>
+
+                <div class="w-full lg:w-80 bg-slate-900 border-l border-slate-800 p-6 overflow-y-auto">
+                    <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-6">Squad Status (Active)</h3>
+                    <div id="war-squad-list" class="space-y-3 opacity-80"></div>
+                </div>
+            </div>
+
+            <div id="view-content" class="flex-1 overflow-y-auto p-8 pb-32">
                 <div id="view-home" class="space-y-12">
                     <div class="bg-slate-900 text-white p-6 rounded-3xl shadow-xl flex items-center justify-between">
                         <div class="space-y-1">
@@ -295,105 +520,53 @@
                 </div>
             </div>
 
-            <div class="fixed bottom-8 right-8 z-[100]">
-                <button id="timerBtn" onclick="toggleTimer()" class="bg-slate-900 text-white px-10 py-5 rounded-3xl font-black shadow-2xl hover:bg-orange-600 transition-all uppercase tracking-widest text-xs flex items-center gap-3">
-                    <span id="timer-dot" class="w-2 h-2 bg-orange-500 rounded-full"></span> Engage Mission
+            <div id="floating-timer-container" class="fixed bottom-8 right-8 z-[100] flex flex-col items-end gap-3">
+                <button id="timerBtn" onclick="switchTab('war')" class="bg-slate-900 text-white px-10 py-5 rounded-3xl font-black shadow-2xl hover:bg-orange-600 transition-all uppercase tracking-widest text-xs flex items-center gap-3">
+                    <span id="timer-dot" class="w-2 h-2 bg-orange-500 rounded-full"></span> Enter War Room
                 </button>
             </div>
         </main>
     </div>
 
-    <div id="pdf-modal" class="fixed inset-0 bg-slate-900/95 z-[300] hidden flex flex-col p-6">
+    <div id="pdf-modal" class="fixed inset-0 bg-slate-900/95 z-[300] hidden flex flex-col p-4 md:p-10">
         <div class="flex justify-between items-center text-white mb-6">
             <h2 id="pdf-title" class="font-black italic uppercase text-sm tracking-widest">Document Vault</h2>
-            <button onclick="closePDF()" class="bg-red-600 px-6 py-2 rounded-xl font-bold text-[10px] uppercase shadow-lg">Exit [X]</button>
+            <button onclick="closePDF()" class="bg-red-600 px-6 py-2 rounded-xl font-bold text-[10px] uppercase shadow-lg hover:bg-red-700 transition">Exit [X]</button>
         </div>
-        <div class="flex-1 bg-white rounded-3xl overflow-hidden flex flex-col items-center justify-center border-4 border-slate-800 shadow-2xl">
-            <p id="pdf-status" class="text-slate-300 font-black italic text-xl">PDF REDIRECTING...</p>
-            <p id="pdf-file-name" class="text-[10px] text-slate-400 mt-2 font-mono italic">please wait</p>
+        <div class="flex-1 bg-slate-800 rounded-3xl overflow-hidden flex flex-col border-4 border-slate-700 shadow-2xl relative">
+            <iframe id="pdf-frame" class="w-full h-full bg-white hidden" src=""></iframe>
+            <div id="pdf-loader" class="absolute inset-0 flex flex-col items-center justify-center text-center p-6">
+                <p id="pdf-status" class="text-orange-500 font-black italic text-xl animate-pulse">AUTHORIZING ACCESS...</p>
+                <p id="pdf-file-name" class="text-[10px] text-slate-400 mt-2 font-mono italic">Verifying credentials</p>
+            </div>
         </div>
     </div>
 
     <script>
-        // --- GOOGLE DRIVE FILE ID MAPPING ---
         const driveLinks = {
-            // Strategic Roadmaps
             'NDA Strategy': '1GtsBv9o6vS9KNTGIPYqM-UsHhgYyyj8p',
-            'CDS Strategy': '',
-            'CAPF Strategy': '',
-            'Trend Analysis 2018-2025': '',
-
-            // Subject Foundations
-            'Grammar Rules': '',
-            'Practice Sheets': '',
-            'Geo NCERT MCQs': '',
-            'Science NCERT MCQs': '',
-            'Mapping Practice': '',
-            'Miscellaneous Material': '',
-
-            // NDA Mathematics Chapters
-            'Sets, Relations and Functions': '',
-            'Complex Numbers': '',
-            'Quadratic Equations': '',
-            'Sequence and Series (AP, GP, HP)': '',
-            'Permutations & Combinations': '',
-            'Binomial Theorem': '',
-            'Matrices & Determinants': '',
-            'Logarithms': '',
-            'Trigonometry Ratios & Identities': '',
-            'Inverse Trig Functions': '',
-            'Heights and Distances': '',
-            'Straight Lines & Circles': '',
-            'Conic Sections': '',
-            '3D Geometry': '',
-            'Vector Algebra': '',
-            'Limits & Continuity': '',
-            'Differentiation': '',
-            'Integral Calculus': '',
-            'Differential Equations': '',
-            'Probability': '',
-            'Statistics': '',
-
-            // NDA GAT Science
-            'Physics: Mechanics': '',
-            'Physics: Electricity': '',
-            'Physics: Optics': '',
-            'Physics: Thermodynamics': '',
-            'Chemistry: Matter & Compounds': '',
-            'Chemistry: Physical/Chemical Changes': '',
-            'Biology: Cell Structure': '',
-            'Biology: Human Body': '',
-
-            // NDA GAT GS
-            'History: Freedom Struggle': '',
-            'History: Ancient & Medieval': '',
-            'Geography: Physical & World': '',
-            'Geography: Indian': '',
-            'Polity: Constitution & Governance': '',
-            'Economics: Basic Concepts': '',
-
-            // CDS Mathematics
-            'Arithmetic': '',
-            'Geometry': '',
-            'Algebra': '',
-            'Trigonometry': '',
-
-            // CDS GK & English
-            'Science': '',
-            'History': '',
-            'Geography': '',
-            'Polity': '',
-            'Comprehension': '',
-            'Grammar': '',
-            'Vocabulary': '',
-
-            // CAPF
-            'General Science': '',
-            'Mental Ability': '',
-            'History & Eco': '',
-            'Essay': '',
-            'Precis': '',
-            'Argument Writing': ''
+            'CDS Strategy': '', 'CAPF Strategy': '', 'Trend Analysis 2018-2025': '',
+            'Grammar Rules': '', 'Practice Sheets': '', 'Geo NCERT MCQs': '',
+            'Science NCERT MCQs': '', 'Mapping Practice': '', 'Miscellaneous Material': '',
+            'Sets, Relations and Functions': '', 'Complex Numbers': '', 'Quadratic Equations': '',
+            'Sequence and Series (AP, GP, HP)': '', 'Permutations & Combinations': '',
+            'Binomial Theorem': '', 'Matrices & Determinants': '', 'Logarithms': '',
+            'Trigonometry Ratios & Identities': '', 'Inverse Trig Functions': '',
+            'Heights and Distances': '', 'Straight Lines & Circles': '', 'Conic Sections': '',
+            '3D Geometry': '', 'Vector Algebra': '', 'Limits & Continuity': '',
+            'Differentiation': '', 'Integral Calculus': '', 'Differential Equations': '',
+            'Probability': '', 'Statistics': '', 'Physics: Mechanics': '',
+            'Physics: Electricity': '', 'Physics: Optics': '', 'Physics: Thermodynamics': '',
+            'Chemistry: Matter & Compounds': '', 'Chemistry: Physical/Chemical Changes': '',
+            'Biology: Cell Structure': '', 'Biology: Human Body': '',
+            'History: Freedom Struggle': '', 'History: Ancient & Medieval': '',
+            'Geography: Physical & World': '', 'Geography: Indian': '',
+            'Polity: Constitution & Governance': '', 'Economics: Basic Concepts': '',
+            'Arithmetic': '', 'Geometry': '', 'Algebra': '', 'Trigonometry': '',
+            'Science': '', 'History': '', 'Geography': '', 'Polity': '',
+            'Comprehension': '', 'Grammar': '', 'Vocabulary': '',
+            'General Science': '', 'Mental Ability': '', 'History & Eco': '',
+            'Essay': '', 'Precis': '', 'Argument Writing': ''
         };
 
         const studyData = {
@@ -416,12 +589,29 @@
         let currentLevel = 0, activeExam = "";
 
         window.switchTab = (type) => {
+            document.getElementById('view-content').classList.toggle('hidden', type === 'war');
+            document.getElementById('view-war').classList.toggle('hidden', type !== 'war');
+            document.getElementById('main-sidebar').classList.toggle('hidden', type === 'war');
+            
             document.getElementById('content-free').classList.toggle('hidden', type !== 'free');
-            document.getElementById('content-paid').classList.toggle('hidden', type === 'free');
+            document.getElementById('content-paid').classList.toggle('hidden', type !== 'paid');
+            
             document.getElementById('btn-free').classList.toggle('tab-active', type === 'free');
-            document.getElementById('btn-paid').classList.toggle('tab-active', type !== 'free');
+            document.getElementById('btn-war').classList.toggle('tab-active', type === 'war');
+            document.getElementById('btn-paid').classList.toggle('tab-active', type === 'paid');
+            
+            // UI Adjustment for War Room
+            const floatBtn = document.getElementById('timerBtn');
+            if(type === 'war') {
+                floatBtn.innerHTML = `<span id="timer-dot" class="w-2 h-2 bg-orange-500 rounded-full"></span> Return to Vault`;
+                floatBtn.onclick = () => switchTab('free');
+            } else {
+                floatBtn.innerHTML = `<span id="timer-dot" class="w-2 h-2 bg-orange-500 rounded-full"></span> Enter War Room`;
+                floatBtn.onclick = () => switchTab('war');
+            }
+
             if(type === 'free') goHome();
-            else if(window.isPremiumUser) unlockPremiumUI();
+            else if(type === 'paid' && window.isPremiumUser) unlockPremiumUI();
         }
 
         window.drillDown = (key) => {
@@ -461,24 +651,22 @@
 
         window.openPDF = (title) => {
             const modal = document.getElementById('pdf-modal');
+            const frame = document.getElementById('pdf-frame');
+            const loader = document.getElementById('pdf-loader');
             const fileId = driveLinks[title];
             document.getElementById('pdf-title').innerText = title;
             modal.classList.remove('hidden');
-
+            frame.classList.add('hidden');
+            loader.classList.remove('hidden');
             if (fileId) {
-                document.getElementById('pdf-status').innerText = "OPENING SECURE DRIVE...";
-                document.getElementById('pdf-file-name').innerText = "Redirecting to cloud document";
-                
-                // FIXED MOBILE LINK FORMAT
-                const mobileFriendlyLink = `https://drive.google.com/file/d/${fileId}/view?usp=sharing`;
-                window.open(mobileFriendlyLink, '_blank');
+                frame.src = `https://drive.google.com/file/d/${fileId}/preview`;
+                frame.onload = () => { loader.classList.add('hidden'); frame.classList.remove('hidden'); };
             } else {
                 document.getElementById('pdf-status').innerText = "NOT LINKED";
-                document.getElementById('pdf-file-name').innerText = "Add Drive ID to 'driveLinks' in code.";
             }
         }
         
-        window.closePDF = () => { document.getElementById('pdf-modal').classList.add('hidden'); }
+        window.closePDF = () => { document.getElementById('pdf-modal').classList.add('hidden'); document.getElementById('pdf-frame').src = ""; }
     </script>
 </body>
 </html>
