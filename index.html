@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <title>Hunter Squadron | Study Vault</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, updateDoc, increment, collection, query, orderBy, limit, onSnapshot, where, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+          apiKey: "AIzaSyCg9iZLxNhlPlHmY3er27HNIVOgQ0H4qcI",
+          authDomain: "huntersqn-907e2.firebaseapp.com",
+          projectId: "huntersqn-907e2",
+          storageBucket: "huntersqn-907e2.firebasestorage.app",
+          messagingSenderId: "253484350898",
+          appId: "1:253484350898:web:3f5490bad013d72928f8ab",
+          measurementId: "G-E9EBNH7H67"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // --- AUTHENTICATION LOGIC ---
+        const loginForm = document.getElementById('login-form');
+        loginForm.onsubmit = async (e) => {
+            e.preventDefault();
+            const email = loginForm.email.value;
+            const password = loginForm.password.value;
+            
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+            } catch (error) {
+                if (error.code === 'auth/invalid-credential' || error.code === 'auth/user-not-found') {
+                    const register = confirm("Cadet not found. Would you like to register this account?");
+                    if (register) {
+                        try {
+                            await createUserWithEmailAndPassword(auth, email, password);
+                            alert("Welcome to the Squadron, Cadet!");
+                        } catch (regErr) { alert("Registration error: " + regErr.message); }
+                    }
+                } else {
+                    alert("Auth Error: " + error.message);
+                }
+            }
+        };
+
+        window.logout = () => signOut(auth).then(() => location.reload());
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                document.getElementById('login-screen').classList.add('hidden');
+                setupUserSession(user);
+                loadMeritList();
+            } else {
+                document.getElementById('login-screen').classList.remove('hidden');
+            }
+        });
+
+        // --- DATABASE, TIMER & ANALYTICS ---
+        let totalSec = 0, running = false, timerInterval;
+        const DAILY_GOAL_HOURS = 6; 
+
+        async function setupUserSession(user) {
+            const userRef = doc(db, "users", user.uid);
+            const userSnap = await getDoc(userRef);
+            if (!userSnap.exists()) {
+                await setDoc(userRef, { 
+                    name: user.email.split('@')[0], 
+                    totalStudyTime: 0, 
+                    isPremium: false,
+                    lastStudyDate: new Date().toISOString().split('T')[0]
+                });
+            } else {
+                const data = userSnap.data();
+                totalSec = data.totalStudyTime || 0;
+                if (data.isPremium) {
+                    window.isPremiumUser = true;
+                    unlockPremiumUI();
+                }
+                updateTimerDisplay();
+                updateAnalyticsDisplay(totalSec);
+            }
+        }
+
+        function unlockPremiumUI() {
+            document.getElementById('premium-msg').innerText = "Elite Access Granted. Welcome to the Arsenal.";
+            document.getElementById('premium-btn').innerText = "Enter Arsenal";
+            document.getElementById('premium-btn').classList.replace('bg-slate-200', 'bg-orange-600');
+            document.getElementById('premium-btn').classList.replace('text-slate-400', 'text-white');
+            document.getElementById('premium-btn').classList.remove('cursor-not-allowed');
+        }
+
+        window.toggleTimer = async () => {
+            const btn = document.getElementById('timerBtn');
+            const dot = document.getElementById('timer-dot');
+            if(!running) {
+                running = true;
+                btn.classList.replace('bg-slate-900', 'bg-orange-600');
+                dot.classList.add('animate-ping');
+                timerInterval = setInterval(() => { 
+                    totalSec++; 
+                    updateTimerDisplay(); 
+                    if (totalSec % 60 === 0) saveProgress(); 
+                }, 1000);
+            } else {
+                running = false;
+                btn.classList.replace('bg-orange-600', 'bg-slate-900');
+                dot.classList.remove('animate-ping');
+                clearInterval(timerInterval);
+                saveProgress();
+            }
+        };
+
+        async function saveProgress() {
+            const user = auth.currentUser;
+            if (user) {
+                await updateDoc(doc(db, "users", user.uid), { 
+                    totalStudyTime: totalSec,
+                    lastActive: new Date()
+                });
+                updateAnalyticsDisplay(totalSec);
+            }
+        }
+
+        function updateTimerDisplay() {
+            const h = Math.floor(totalSec/3600), m = Math.floor((totalSec%3600)/60), s = totalSec%60;
+            document.getElementById('timer-display').innerText = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+        }
+
+        function updateAnalyticsDisplay(seconds) {
+            const hours = seconds / 3600;
+            const percentage = Math.min((hours / DAILY_GOAL_HOURS) * 100, 100);
+            document.getElementById('daily-progress-bar').style.width = `${percentage}%`;
+            document.getElementById('daily-progress-text').innerText = `${percentage.toFixed(0)}% of Daily Goal`;
+        }
+
+        function loadMeritList() {
+            const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
+            onSnapshot(q, (snapshot) => {
+                const meritDiv = document.getElementById('merit-list-content');
+                meritDiv.innerHTML = "";
+                let i = 1;
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    meritDiv.innerHTML += `
+                        <div class="flex items-center justify-between p-3 bg-white border rounded-xl">
+                            <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
+                            <span class="text-[10px] font-mono font-black text-orange-600 italic">${(data.totalStudyTime/3600).toFixed(1)}h</span>
+                        </div>`;
+                });
+            });
+        }
+
+        window.adminUpgrade = async (targetEmail) => {
+            const q = query(collection(db, "users"), where("name", "==", targetEmail.split('@')[0]));
+            const querySnapshot = await getDocs(q);
+            if(querySnapshot.empty) { console.log("User not found."); return; }
+            querySnapshot.forEach(async (d) => {
+                 await updateDoc(doc(db, "users", d.id), { isPremium: true });
+                 console.log(`Upgraded ${d.data().name} to Elite.`);
+            });
+        }
+    </script>
+
+    <style>
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background-color: #f8fafc; overflow: hidden; }
+        .tab-active { background-color: #f97316; color: white; border-color: #f97316; }
+        .hidden { display: none; }
+        .card-item { transition: all 0.2s; border: 2px solid #f1f5f9; background: white; }
+        .card-item:hover { border-color: #f97316; transform: translateY(-2px); cursor: pointer; }
+        .breadcrumb:hover { text-decoration: underline; cursor: pointer; color: #f97316; }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
+    </style>
+</head>
+<body class="text-slate-800 flex flex-col h-screen">
+
+    <div id="login-screen" class="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-slate-50">
+        <div class="bg-white p-10 rounded-3xl shadow-2xl w-full max-w-md border border-slate-100">
+            <h1 class="text-3xl font-black text-center text-slate-900 mb-2 italic tracking-tighter text-orange-600">HUNTER SQUADRON</h1>
+            <p class="text-center text-slate-400 text-[10px] mb-8 font-bold uppercase tracking-[0.2em]">Aspirant Authentication</p>
+            <form id="login-form" class="space-y-4">
+                <input name="email" type="email" placeholder="Email ID" class="w-full p-4 bg-slate-50 border rounded-2xl outline-none focus:ring-2 focus:ring-orange-500 transition" required>
+                <input name="password" type="password" placeholder="Password" class="w-full p-4 bg-slate-50 border rounded-2xl outline-none focus:ring-2 focus:ring-orange-500 transition" required>
+                <button type="submit" class="w-full bg-slate-900 text-white p-4 rounded-2xl font-black hover:bg-orange-600 transition shadow-lg uppercase text-xs tracking-widest">Enter HQ</button>
+            </form>
+        </div>
+    </div>
+
+    <nav class="bg-white px-8 py-4 border-b flex justify-between items-center z-50">
+        <div class="flex items-center gap-8">
+            <span class="font-black text-2xl italic text-orange-600 tracking-tighter">HUNTER SQUADRON</span>
+            <div class="flex bg-slate-100 p-1 rounded-xl text-[11px] font-black border uppercase tracking-tighter">
+                <button id="btn-free" onclick="switchTab('free')" class="px-6 py-2 rounded-lg tab-active transition-all">Free Bunker</button>
+                <button id="btn-paid" onclick="switchTab('paid')" class="px-6 py-2 rounded-lg text-slate-500 transition-all">Elite Arsenal</button>
+            </div>
+        </div>
+        <div class="flex items-center gap-6">
+            <div id="timer-display" class="font-mono font-black text-xl text-slate-900">00:00:00</div>
+            <button onclick="logout()" class="text-[10px] font-black text-red-500 uppercase tracking-widest border border-red-100 px-3 py-1 rounded-lg">Sign Out</button>
+        </div>
+    </nav>
+
+    <div id="dashboard" class="flex-1 flex overflow-hidden">
+        <aside class="w-72 bg-white border-r hidden lg:flex flex-col">
+            <div class="p-6 border-b"><h2 class="font-black text-xs uppercase tracking-widest text-slate-400">Merit List (Live)</h2></div>
+            <div id="merit-list-content" class="flex-1 overflow-y-auto p-4 space-y-3 bg-slate-50/30"></div>
+        </aside>
+
+        <main class="flex-1 flex flex-col bg-white overflow-hidden relative">
+            <div class="px-8 py-3 bg-slate-50/50 border-b text-[9px] font-black text-slate-400 flex gap-2 items-center tracking-[0.2em] uppercase">
+                <span onclick="goHome()" class="breadcrumb text-orange-600">Home</span>
+                <span id="bc-exam-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-exam"></span></span>
+                <span id="bc-subject-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-subject"></span></span>
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-8 pb-32">
+                <div id="view-home" class="space-y-12">
+                    <div class="bg-slate-900 text-white p-6 rounded-3xl shadow-xl flex items-center justify-between">
+                        <div class="space-y-1">
+                            <h3 class="text-xs font-bold uppercase tracking-widest text-orange-500">Service Record</h3>
+                            <p class="text-lg font-black italic">Daily Mission Status</p>
+                        </div>
+                        <div class="w-1/2">
+                            <div class="flex justify-between text-[10px] uppercase font-bold mb-1">
+                                <span class="text-slate-400">Progress</span>
+                                <span id="daily-progress-text" class="text-orange-500">0% of Daily Goal</span>
+                            </div>
+                            <div class="h-3 bg-slate-700 rounded-full overflow-hidden">
+                                <div id="daily-progress-bar" class="h-full bg-gradient-to-r from-orange-600 to-yellow-500 w-0 transition-all duration-500"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="content-free" class="space-y-10">
+                        <section>
+                            <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-4">Strategic Roadmap</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                                <div onclick="openPDF('NDA Strategy')" class="card-item p-5 rounded-2xl shadow-sm border-l-4 border-l-orange-500">
+                                    <h4 class="font-bold text-xs uppercase">NDA Strategy</h4>
+                                    <p class="text-[10px] text-slate-500 mt-1 italic">Phase-wise roadmap</p>
+                                </div>
+                                <div onclick="openPDF('CDS Strategy')" class="card-item p-5 rounded-2xl shadow-sm border-l-4 border-l-blue-500">
+                                    <h4 class="font-bold text-xs uppercase">CDS Strategy</h4>
+                                    <p class="text-[10px] text-slate-500 mt-1 italic">Subject mastery plan</p>
+                                </div>
+                                <div onclick="openPDF('CAPF Strategy')" class="card-item p-5 rounded-2xl shadow-sm border-l-4 border-l-green-500">
+                                    <h4 class="font-bold text-xs uppercase">CAPF Strategy</h4>
+                                    <p class="text-[10px] text-slate-500 mt-1 italic">Paper 1 & 2 guide</p>
+                                </div>
+                                <div onclick="openPDF('Trend Analysis 2018-2025')" class="card-item p-5 rounded-2xl shadow-sm border-l-4 border-l-slate-800">
+                                    <h4 class="font-bold text-xs uppercase">Trend Analysis</h4>
+                                    <p class="text-[10px] text-slate-500 mt-1 italic">2018-2025 Weightage</p>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section>
+                            <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-4">The PYQ Vault</h3>
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div onclick="drillDown('NDA')" class="card-item p-6 rounded-2xl shadow-sm font-black text-center text-sm uppercase italic">NDA PYQs →</div>
+                                <div onclick="drillDown('CDS')" class="card-item p-6 rounded-2xl shadow-sm font-black text-center text-sm uppercase italic">CDS PYQs →</div>
+                                <div onclick="drillDown('CAPF')" class="card-item p-6 rounded-2xl shadow-sm font-black text-center text-sm uppercase italic">CAPF PYQs →</div>
+                            </div>
+                        </section>
+
+                        <section>
+                            <h3 class="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mb-4">Subject Foundations</h3>
+                            <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                                <div onclick="openPDF('Grammar Rules')" class="card-item p-4 rounded-xl text-center font-bold text-xs">Grammar Rules</div>
+                                <div onclick="openPDF('Practice Sheets')" class="card-item p-4 rounded-xl text-center font-bold text-xs">Practice Sheets</div>
+                                <div onclick="openPDF('Geo NCERT MCQs')" class="card-item p-4 rounded-xl text-center font-bold text-xs">Geography MCQs</div>
+                                <div onclick="openPDF('Science NCERT MCQs')" class="card-item p-4 rounded-xl text-center font-bold text-xs">Science MCQs</div>
+                                <div onclick="openPDF('Mapping Practice')" class="card-item p-4 rounded-xl text-center font-bold text-xs">Mapping</div>
+                                <div onclick="openPDF('Miscellaneous Material')" class="card-item p-4 rounded-xl text-center font-bold text-xs">Miscellaneous</div>
+                            </div>
+                        </section>
+                    </div>
+
+                    <div id="content-paid" class="hidden flex flex-col items-center justify-center py-20 text-center">
+                        <h2 class="text-2xl font-black italic tracking-tighter text-slate-900 uppercase">Elite Arsenal</h2>
+                        <p id="premium-msg" class="text-sm text-slate-500 max-w-sm mt-2 mb-8">Premium NCERT Highlights are under construction.</p>
+                        <button id="premium-btn" class="bg-slate-200 text-slate-400 cursor-not-allowed px-10 py-4 rounded-2xl font-black uppercase text-xs tracking-widest">Locked</button>
+                    </div>
+                </div>
+
+                <div id="view-list" class="hidden space-y-6">
+                    <div id="list-container" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
+                </div>
+            </div>
+
+            <div class="fixed bottom-8 right-8 z-[100]">
+                <button id="timerBtn" onclick="toggleTimer()" class="bg-slate-900 text-white px-10 py-5 rounded-3xl font-black shadow-2xl hover:bg-orange-600 transition-all uppercase tracking-widest text-xs flex items-center gap-3">
+                    <span id="timer-dot" class="w-2 h-2 bg-orange-500 rounded-full"></span> Engage Mission
+                </button>
+            </div>
+        </main>
+    </div>
+
+    <div id="pdf-modal" class="fixed inset-0 bg-slate-900/95 z-[300] hidden flex flex-col p-6">
+        <div class="flex justify-between items-center text-white mb-6">
+            <h2 id="pdf-title" class="font-black italic uppercase text-sm tracking-widest">Document Vault</h2>
+            <button onclick="closePDF()" class="bg-red-600 px-6 py-2 rounded-xl font-bold text-[10px] uppercase shadow-lg">Exit [X]</button>
+        </div>
+        <div class="flex-1 bg-white rounded-3xl overflow-hidden flex flex-col items-center justify-center border-4 border-slate-800 shadow-2xl">
+            <p id="pdf-status" class="text-slate-300 font-black italic text-xl">PDF REDIRECTING...</p>
+            <p id="pdf-file-name" class="text-[10px] text-slate-400 mt-2 font-mono italic">please wait</p>
+        </div>
+    </div>
+
+    <script>
+        // --- GOOGLE DRIVE FILE ID MAPPING ---
+        const driveLinks = {
+            // Strategic Roadmaps
+            'NDA Strategy': '1GtsBv9o6vS9KNTGIPYqM-UsHhgYyyj8p',
+            'CDS Strategy': '',
+            'CAPF Strategy': '',
+            'Trend Analysis 2018-2025': '',
+
+            // Subject Foundations
+            'Grammar Rules': '',
+            'Practice Sheets': '',
+            'Geo NCERT MCQs': '',
+            'Science NCERT MCQs': '',
+            'Mapping Practice': '',
+            'Miscellaneous Material': '',
+
+            // NDA Mathematics Chapters
+            'Sets, Relations and Functions': '',
+            'Complex Numbers': '',
+            'Quadratic Equations': '',
+            'Sequence and Series (AP, GP, HP)': '',
+            'Permutations & Combinations': '',
+            'Binomial Theorem': '',
+            'Matrices & Determinants': '',
+            'Logarithms': '',
+            'Trigonometry Ratios & Identities': '',
+            'Inverse Trig Functions': '',
+            'Heights and Distances': '',
+            'Straight Lines & Circles': '',
+            'Conic Sections': '',
+            '3D Geometry': '',
+            'Vector Algebra': '',
+            'Limits & Continuity': '',
+            'Differentiation': '',
+            'Integral Calculus': '',
+            'Differential Equations': '',
+            'Probability': '',
+            'Statistics': '',
+
+            // NDA GAT Science
+            'Physics: Mechanics': '',
+            'Physics: Electricity': '',
+            'Physics: Optics': '',
+            'Physics: Thermodynamics': '',
+            'Chemistry: Matter & Compounds': '',
+            'Chemistry: Physical/Chemical Changes': '',
+            'Biology: Cell Structure': '',
+            'Biology: Human Body': '',
+
+            // NDA GAT GS
+            'History: Freedom Struggle': '',
+            'History: Ancient & Medieval': '',
+            'Geography: Physical & World': '',
+            'Geography: Indian': '',
+            'Polity: Constitution & Governance': '',
+            'Economics: Basic Concepts': '',
+
+            // CDS Mathematics
+            'Arithmetic': '',
+            'Geometry': '',
+            'Algebra': '',
+            'Trigonometry': '',
+
+            // CDS GK & English
+            'Science': '',
+            'History': '',
+            'Geography': '',
+            'Polity': '',
+            'Comprehension': '',
+            'Grammar': '',
+            'Vocabulary': '',
+
+            // CAPF
+            'General Science': '',
+            'Mental Ability': '',
+            'History & Eco': '',
+            'Essay': '',
+            'Precis': '',
+            'Argument Writing': ''
+        };
+
+        const studyData = {
+            'NDA': {
+                'Mathematics PYQs': ['Sets, Relations and Functions', 'Complex Numbers', 'Quadratic Equations', 'Sequence and Series (AP, GP, HP)', 'Permutations & Combinations', 'Binomial Theorem', 'Matrices & Determinants', 'Logarithms', 'Trigonometry Ratios & Identities', 'Inverse Trig Functions', 'Heights and Distances', 'Straight Lines & Circles', 'Conic Sections', '3D Geometry', 'Vector Algebra', 'Limits & Continuity', 'Differentiation', 'Integral Calculus', 'Differential Equations', 'Probability', 'Statistics'],
+                'GAT Science PYQs': ['Physics: Mechanics', 'Physics: Electricity', 'Physics: Optics', 'Physics: Thermodynamics', 'Chemistry: Matter & Compounds', 'Chemistry: Physical/Chemical Changes', 'Biology: Cell Structure', 'Biology: Human Body'],
+                'GAT GS PYQs': ['History: Freedom Struggle', 'History: Ancient & Medieval', 'Geography: Physical & World', 'Geography: Indian', 'Polity: Constitution & Governance', 'Economics: Basic Concepts']
+            },
+            'CDS': {
+                'Mathematics': ['Arithmetic', 'Geometry', 'Algebra', 'Trigonometry'],
+                'GK': ['Science', 'History', 'Geography', 'Polity'],
+                'English': ['Comprehension', 'Grammar', 'Vocabulary']
+            },
+            'CAPF': {
+                'Paper I': ['General Science', 'Mental Ability', 'History & Eco'],
+                'Paper II': ['Essay', 'Precis', 'Argument Writing']
+            }
+        };
+
+        let currentLevel = 0, activeExam = "";
+
+        window.switchTab = (type) => {
+            document.getElementById('content-free').classList.toggle('hidden', type !== 'free');
+            document.getElementById('content-paid').classList.toggle('hidden', type === 'free');
+            document.getElementById('btn-free').classList.toggle('tab-active', type === 'free');
+            document.getElementById('btn-paid').classList.toggle('tab-active', type !== 'free');
+            if(type === 'free') goHome();
+            else if(window.isPremiumUser) unlockPremiumUI();
+        }
+
+        window.drillDown = (key) => {
+            if (currentLevel === 0) {
+                activeExam = key;
+                renderList(Object.keys(studyData[key]), 1, key);
+            } else if (currentLevel === 1) {
+                renderList(studyData[activeExam][key], 2, key);
+            }
+        }
+
+        function renderList(items, level, title) {
+            currentLevel = level;
+            document.getElementById('view-home').classList.add('hidden');
+            document.getElementById('view-list').classList.remove('hidden');
+            document.getElementById(level === 1 ? 'bc-exam-wrap' : 'bc-subject-wrap').classList.remove('hidden');
+            document.getElementById(level === 1 ? 'bc-exam' : 'bc-subject').innerText = title;
+            const container = document.getElementById('list-container');
+            container.innerHTML = "";
+            items.forEach(item => {
+                const action = (level === 1) ? `drillDown('${item}')` : `openPDF('${item}')`;
+                container.innerHTML += `
+                    <div onclick="${action}" class="card-item p-5 rounded-2xl flex justify-between items-center group">
+                        <span class="text-xs font-bold text-slate-700">${item}</span>
+                        <span class="text-[10px] text-orange-500 font-black opacity-0 group-hover:opacity-100 uppercase">${(level === 1) ? 'Open Subject' : 'Open PDF'}</span>
+                    </div>`;
+            });
+        }
+
+        window.goHome = () => {
+            currentLevel = 0;
+            document.getElementById('view-home').classList.remove('hidden');
+            document.getElementById('view-list').classList.add('hidden');
+            document.getElementById('bc-exam-wrap').classList.add('hidden');
+            document.getElementById('bc-subject-wrap').classList.add('hidden');
+        }
+
+        window.openPDF = (title) => {
+            const modal = document.getElementById('pdf-modal');
+            const fileId = driveLinks[title];
+            document.getElementById('pdf-title').innerText = title;
+            modal.classList.remove('hidden');
+
+            if (fileId) {
+                document.getElementById('pdf-status').innerText = "OPENING SECURE DRIVE...";
+                document.getElementById('pdf-file-name').innerText = "Redirecting to cloud document";
+                
+                // FIXED MOBILE LINK FORMAT
+                const mobileFriendlyLink = `https://drive.google.com/file/d/${fileId}/view?usp=sharing`;
+                window.open(mobileFriendlyLink, '_blank');
+            } else {
+                document.getElementById('pdf-status').innerText = "NOT LINKED";
+                document.getElementById('pdf-file-name').innerText = "Add Drive ID to 'driveLinks' in code.";
+            }
+        }
+        
+        window.closePDF = () => { document.getElementById('pdf-modal').classList.add('hidden'); }
+    </script>
+</body>
+</html>
