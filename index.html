@@ -284,30 +284,34 @@
         }
 
         function loadMeritList() {
-            const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
-            onSnapshot(q, (snapshot) => {
-                const meritDiv = document.getElementById('merit-list-content');
-                const warMeritDiv = document.getElementById('war-squad-list');
-                meritDiv.innerHTML = "";
-                if(warMeritDiv) warMeritDiv.innerHTML = "";
-                let i = 1;
-                snapshot.forEach((doc) => {
-                    const data = doc.data();
-                    const hours = (data.totalStudyTime/3600);
-                    const rank = getRank(hours);
-                    const html = `
-                        <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
-                            <div class="flex flex-col">
-                                <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rank}</span>
-                                <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
-                            </div>
-                            <span class="text-[10px] font-mono font-black text-slate-400 italic">${hours.toFixed(1)}h</span>
-                        </div>`;
-                    meritDiv.innerHTML += html;
-                    if(warMeritDiv) warMeritDiv.innerHTML += html.replace('bg-white', 'bg-slate-950').replace('text-slate-600', 'text-slate-400');
-                });
-            });
-        }
+    const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
+    onSnapshot(q, (snapshot) => {
+        const meritDiv = document.getElementById('merit-list-content');
+        meritDiv.innerHTML = "";
+        let i = 1;
+        snapshot.forEach((doc) => {
+            const data = doc.data();
+            const total = data.totalStudyTime || 0;
+            
+            // Convert seconds to H:M:S
+            const h = Math.floor(total / 3600);
+            const m = Math.floor((total % 3600) / 60);
+            const s = total % 60;
+            const timeStr = `${h}h ${m}m ${s}s`;
+
+            const rank = getRank(h);
+            meritDiv.innerHTML += `
+                <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
+                    <div class="flex flex-col">
+                        <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rank}</span>
+                        <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
+                    </div>
+                    <span class="text-[10px] font-mono font-black text-slate-400 italic">${timeStr}</span>
+                </div>`;
+        });
+    });
+}
+
 
         window.adminUpgrade = async (targetEmail) => {
             const q = query(collection(db, "users"), where("name", "==", targetEmail.split('@')[0]));
