@@ -35,7 +35,7 @@
             setTimeout(() => toast.style.opacity = '0', 3000);
         };
 
-        // --- AUTHENTICATION LOGIC ---
+        // --- AUTHENTICATION LOGIC (IMPROVED) ---
         const loginForm = document.getElementById('login-form');
         loginForm.onsubmit = async (e) => {
             e.preventDefault();
@@ -50,8 +50,23 @@
                     const register = confirm("Cadet not found. Would you like to register this account?");
                     if (register) {
                         try {
-                            await createUserWithEmailAndPassword(auth, email, password);
-                            showToast("Welcome to the Squadron, Cadet!", 'success');
+                            const userCred = await createUserWithEmailAndPassword(auth, email, password);
+                            await setDoc(doc(db, "users", userCred.user.uid), {
+                                name: email.split('@')[0],
+                                email: email,
+                                totalStudyTime: 0,
+                                isPremium: false,
+                                rank: "Cadet",
+                                joinedDate: new Date().toISOString().split('T')[0],
+                                lastStudyDate: getSquadronDate(),
+                                subjectStats: {},
+                                dailyTodos: [],
+                                paymentStatus: "none",
+                                dailyGoal: 6,
+                                streak: 0,
+                                isOnline: false
+                            });
+                            showToast("Welcome to the Squadron, Cadet! Profile Created.", 'success');
                         } catch (regErr) { showToast("Registration error: " + regErr.message, 'err'); }
                     }
                 } else {
@@ -60,13 +75,19 @@
             }
         };
 
-        window.logout = () => signOut(auth).then(() => location.reload());
+        window.logout = () => {
+            const user = auth.currentUser;
+            if(user) updateDoc(doc(db, "users", user.uid), { isOnline: false });
+            signOut(auth).then(() => location.reload());
+        };
 
         onAuthStateChanged(auth, async (user) => {
             if (user) {
                 document.getElementById('login-screen').classList.add('hidden');
                 setupUserSession(user);
                 loadMeritList();
+                loadProfileData(user);
+                loadSquadPresence(); // Initialize Room Activity
             } else {
                 document.getElementById('login-screen').classList.remove('hidden');
             }
@@ -74,10 +95,9 @@
 
         // --- DATABASE, TIMER & ANALYTICS ---
         let totalSec = 0, sessionSec = 0, running = false, timerInterval;
-        let isPomodoro = false, pomoTime = 1500; // 25 mins
-        const DAILY_GOAL_HOURS = 6; 
+        let isPomodoro = false, pomoTime = 1500; 
+        let dailyGoalHours = 6; 
 
-        // 5 AM RESET LOGIC
         function getSquadronDate() {
             const now = new Date();
             const hour = now.getHours();
@@ -94,20 +114,39 @@
             if (!userSnap.exists()) {
                 await setDoc(userRef, { 
                     name: user.email.split('@')[0], 
+                    email: user.email,
                     totalStudyTime: 0, 
                     isPremium: false,
+                    rank: "Cadet",
+                    joinedDate: currentDate,
                     lastStudyDate: currentDate,
                     subjectStats: {},
-                    dailyTodos: []
+                    dailyTodos: [],
+                    dailyGoal: 6,
+                    streak: 0
                 });
             } else {
                 const data = userSnap.data();
-                // Check if we need to reset for a new day (at 5 AM)
+                if(data.dailyGoal) dailyGoalHours = data.dailyGoal;
+
+                // STREAK & RESET LOGIC
                 if (data.lastStudyDate !== currentDate) {
+                    const yesterday = new Date();
+                    yesterday.setDate(yesterday.getDate() - 1);
+                    const yesterdayStr = yesterday.toISOString().split('T')[0];
+                    
+                    let newStreak = data.streak || 0;
+                    // If goal was met yesterday, keep/increment streak, else reset
+                    if (data.lastStudyDate !== yesterdayStr && data.lastStudyDate !== currentDate) {
+                        newStreak = 0; 
+                    }
+
                     await updateDoc(userRef, {
                         totalStudyTime: 0,
                         lastStudyDate: currentDate,
-                        dailyTodos: [] // Clear todos for new day
+                        dailyTodos: [],
+                        streak: newStreak,
+                        isOnline: false
                     });
                     totalSec = 0;
                 } else {
@@ -118,10 +157,77 @@
                     window.isPremiumUser = true;
                     unlockPremiumUI();
                 }
+
                 updateTimerDisplay();
                 updateAnalyticsDisplay(totalSec);
                 renderSubjectStats(data.subjectStats || {});
                 renderTodos(data.dailyTodos || []);
+            }
+        }
+
+        async function loadProfileData(user) {
+            const snap = await getDoc(doc(db, "users", user.uid));
+            if(snap.exists()) {
+                const data = snap.data();
+                document.getElementById('pf-name').innerText = data.name;
+                document.getElementById('pf-rank').innerText = data.rank || "Cadet";
+                document.getElementById('pf-joined').innerText = data.joinedDate || "Unknown";
+                document.getElementById('pf-email').innerText = data.email;
+                document.getElementById('pf-status').innerText = data.isPremium ? "ELITE" : "STANDARD";
+                document.getElementById('pf-streak').innerText = `${data.streak || 0} Day Streak`;
+                document.getElementById('goal-input').value = data.dailyGoal || 6;
+                if(data.isPremium) document.getElementById('pf-status').classList.add('text-orange-600');
+                
+                // NEW: Load Squad UI in Profile
+                if(data.squadId) {
+                    loadSquadInfo(data.squadId);
+                } else {
+                    document.getElementById('squad-setup-area').classList.remove('hidden');
+                    document.getElementById('squad-active-area').classList.add('hidden');
+                }
+            }
+        }
+
+        // --- NEW: SQUAD ROOM PRESENCE ---
+        function loadSquadPresence() {
+            const q = query(collection(db, "users"), where("isOnline", "==", true), limit(20));
+            onSnapshot(q, (snapshot) => {
+                const container = document.getElementById('war-squad-list');
+                const momentumEl = document.getElementById('squad-momentum');
+                container.innerHTML = "";
+                let totalSquadSec = 0;
+
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    totalSquadSec += (data.totalStudyTime || 0);
+                    
+                    container.innerHTML += `
+                        <div class="flex items-center gap-3 p-3 bg-slate-800/50 rounded-xl border border-slate-700 animate-pulse">
+                            <div class="w-2 h-2 bg-green-500 rounded-full shadow-[0_0_8px_#22c55e]"></div>
+                            <div class="flex-1">
+                                <p class="text-[10px] font-black text-white uppercase">${data.name}</p>
+                                <p class="text-[8px] text-slate-400 font-bold uppercase tracking-widest">${data.rank || 'Cadet'}</p>
+                            </div>
+                            <span class="text-[9px] font-mono text-orange-500 font-bold">${Math.floor((data.totalStudyTime || 0)/3600)}h</span>
+                        </div>`;
+                });
+
+                if(momentumEl) momentumEl.innerText = `${(totalSquadSec / 3600).toFixed(1)}H SQUAD IMPACT`;
+            });
+        }
+
+        window.saveDailyGoal = async () => {
+            const newGoal = parseInt(document.getElementById('goal-input').value);
+            if(!newGoal || newGoal < 1 || newGoal > 24) {
+                showToast("Invalid Target (1-24 hours)", "err");
+                return;
+            }
+            const user = auth.currentUser;
+            if(user) {
+                await updateDoc(doc(db, "users", user.uid), { dailyGoal: newGoal });
+                dailyGoalHours = newGoal;
+                updateAnalyticsDisplay(totalSec);
+                showToast(`Mission Target Updated to ${newGoal} Hours`);
             }
         }
 
@@ -131,14 +237,15 @@
             document.getElementById('premium-btn').classList.replace('bg-slate-200', 'bg-orange-600');
             document.getElementById('premium-btn').classList.replace('text-slate-400', 'text-white');
             document.getElementById('premium-btn').classList.remove('cursor-not-allowed');
+            document.getElementById('payment-form-container').classList.add('hidden');
         }
 
-        // IMPROVED TIMER LOGIC (YPT STYLE)
         window.toggleTimer = async () => {
             const btn = document.getElementById('timerBtn');
             const warBtn = document.getElementById('warRoomBtn');
             const dot = document.getElementById('timer-dot');
             const missionSubject = document.getElementById('mission-select').value;
+            const user = auth.currentUser;
             
             if(!running) {
                 running = true;
@@ -150,6 +257,7 @@
                 document.getElementById('radar').classList.add('radar-active');
                 document.getElementById('active-mission-title').innerText = missionSubject;
                 
+                if(user) await updateDoc(doc(db, "users", user.uid), { isOnline: true });
                 showToast(`Mission: ${missionSubject} Engaged`);
                 
                 timerInterval = setInterval(() => { 
@@ -167,6 +275,7 @@
                 dot.classList.remove('animate-ping');
                 document.getElementById('radar').classList.remove('radar-active');
                 clearInterval(timerInterval);
+                if(user) await updateDoc(doc(db, "users", user.uid), { isOnline: false });
                 saveProgress();
                 showToast("Mission Paused. Data Linked to HQ.");
             }
@@ -180,21 +289,33 @@
 
         async function saveProgress() {
             const user = auth.currentUser;
-            const missionSubject = document.getElementById('mission-select').value.replace(/[:.]/g, ''); // Sanitize key
+            const missionSubject = document.getElementById('mission-select').value.replace(/[:.]/g, ''); 
             if (user) {
                 const userRef = doc(db, "users", user.uid);
+                const hrs = totalSec / 3600;
+                const newRank = getRank(hrs);
+                
+                // STREAK UPDATE: If current hours >= daily goal, mark goal met
+                const snap = await getDoc(userRef);
+                const data = snap.data();
+                let streakUpdate = data.streak || 0;
+                if(hrs >= dailyGoalHours && (data.lastStreakUpdate !== getSquadronDate())) {
+                    streakUpdate++;
+                    await updateDoc(userRef, { lastStreakUpdate: getSquadronDate(), streak: streakUpdate });
+                    showToast(`STREAK MAINTAINED: ${streakUpdate} DAYS!`, 'success');
+                }
+
                 const updateObj = { 
                     totalStudyTime: totalSec,
-                    lastActive: new Date()
+                    lastActive: new Date(),
+                    rank: newRank
                 };
-                // Increment specific subject time
                 updateObj[`subjectStats.${missionSubject}`] = increment(sessionSec);
                 
                 await updateDoc(userRef, updateObj);
-                sessionSec = 0; // Reset session counter after saving to subject stats
+                sessionSec = 0; 
                 updateAnalyticsDisplay(totalSec);
                 
-                // Refresh local UI stats
                 const freshSnap = await getDoc(userRef);
                 renderSubjectStats(freshSnap.data().subjectStats || {});
             }
@@ -213,9 +334,9 @@
 
         function updateAnalyticsDisplay(seconds) {
             const hours = seconds / 3600;
-            const percentage = Math.min((hours / DAILY_GOAL_HOURS) * 100, 100);
+            const percentage = Math.min((hours / dailyGoalHours) * 100, 100);
             document.getElementById('daily-progress-bar').style.width = `${percentage}%`;
-            document.getElementById('daily-progress-text').innerText = `${percentage.toFixed(0)}% of Daily Goal`;
+            document.getElementById('daily-progress-text').innerText = `${percentage.toFixed(0)}% of Daily Goal (${dailyGoalHours}h)`;
         }
 
         function renderSubjectStats(stats) {
@@ -232,7 +353,6 @@
             }
         }
 
-        // TODO LIST LOGIC
         window.addTask = async () => {
             const input = document.getElementById('todo-input');
             const task = input.value.trim();
@@ -284,43 +404,109 @@
         }
 
         function loadMeritList() {
-    const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
-    onSnapshot(q, (snapshot) => {
-        const meritDiv = document.getElementById('merit-list-content');
-        meritDiv.innerHTML = "";
-        let i = 1;
-        snapshot.forEach((doc) => {
-            const data = doc.data();
-            const total = data.totalStudyTime || 0;
-            
-            // Convert seconds to H:M:S
-            const h = Math.floor(total / 3600);
-            const m = Math.floor((total % 3600) / 60);
-            const s = total % 60;
-            const timeStr = `${h}h ${m}m ${s}s`;
-
-            const rank = getRank(h);
-            meritDiv.innerHTML += `
-                <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
-                    <div class="flex flex-col">
-                        <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rank}</span>
-                        <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
-                    </div>
-                    <span class="text-[10px] font-mono font-black text-slate-400 italic">${timeStr}</span>
-                </div>`;
-        });
-    });
-}
-
-
-        window.adminUpgrade = async (targetEmail) => {
-            const q = query(collection(db, "users"), where("name", "==", targetEmail.split('@')[0]));
-            const querySnapshot = await getDocs(q);
-            if(querySnapshot.empty) { showToast("User not found.", "err"); return; }
-            querySnapshot.forEach(async (d) => {
-                 await updateDoc(doc(db, "users", d.id), { isPremium: true });
-                 showToast(`Upgraded ${d.data().name} to Elite.`);
+            const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
+            onSnapshot(q, (snapshot) => {
+                const meritDiv = document.getElementById('merit-list-content');
+                meritDiv.innerHTML = "";
+                let i = 1;
+                snapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const total = data.totalStudyTime || 0;
+                    const h = Math.floor(total / 3600);
+                    const m = Math.floor((total % 3600) / 60);
+                    const s = total % 60;
+                    const timeStr = `${h}h ${m}m ${s}s`;
+                    const rank = getRank(h);
+                    meritDiv.innerHTML += `
+                        <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
+                            <div class="flex flex-col">
+                                <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rank}</span>
+                                <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
+                            </div>
+                            <div class="text-right">
+                                <span class="block text-[10px] font-mono font-black text-slate-400 italic">${timeStr}</span>
+                                <span class="text-[8px] font-bold text-orange-400">🔥 ${data.streak || 0} Days</span>
+                            </div>
+                        </div>`;
+                });
             });
+        }
+
+        window.submitPayment = async () => {
+            const tid = document.getElementById('tid-input').value;
+            if(!tid) { showToast("Enter Transaction ID", "err"); return; }
+            const user = auth.currentUser;
+            if(user) {
+                await updateDoc(doc(db, "users", user.uid), {
+                    paymentStatus: 'pending',
+                    lastTransactionId: tid,
+                    paymentDate: new Date()
+                });
+                showToast("Verification Request Sent. Access pending approval.");
+                document.getElementById('tid-input').value = "";
+                document.getElementById('premium-msg').innerText = "Payment verification in progress. Stand by.";
+            }
+        }
+
+        // --- NEW SQUAD LOGIC ---
+        window.createSquad = async () => {
+            const name = document.getElementById('sq-name-input').value.trim();
+            if(!name) return showToast("Enter Squad Name", "err");
+            const user = auth.currentUser;
+            const squadCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+            
+            try {
+                const squadRef = doc(collection(db, "squads"));
+                await setDoc(squadRef, {
+                    name: name,
+                    code: squadCode,
+                    ownerId: user.uid,
+                    memberIds: [user.uid],
+                    createdDate: new Date()
+                });
+                await updateDoc(doc(db, "users", user.uid), { squadId: squadRef.id });
+                showToast(`Squad Created! Code: ${squadCode}`, 'success');
+                loadProfileData(user);
+            } catch (e) { showToast("Error creating squad", "err"); }
+        }
+
+        window.joinSquad = async () => {
+            const code = document.getElementById('sq-join-input').value.trim().toUpperCase();
+            if(!code) return showToast("Enter Invite Code", "err");
+            const user = auth.currentUser;
+
+            try {
+                const q = query(collection(db, "squads"), where("code", "==", code));
+                const snap = await getDocs(q);
+                if(snap.empty) return showToast("Invalid Squad Code", "err");
+
+                const squadDoc = snap.docs[0];
+                await updateDoc(doc(db, "squads", squadDoc.id), { memberIds: arrayUnion(user.uid) });
+                await updateDoc(doc(db, "users", user.uid), { squadId: squadDoc.id });
+                showToast("Welcome to the Squad, Cadet!");
+                loadProfileData(user);
+            } catch (e) { showToast("Error joining squad", "err"); }
+        }
+
+        async function loadSquadInfo(squadId) {
+            const snap = await getDoc(doc(db, "squads", squadId));
+            if(snap.exists()) {
+                const data = snap.data();
+                document.getElementById('squad-setup-area').classList.add('hidden');
+                document.getElementById('squad-active-area').classList.remove('hidden');
+                document.getElementById('sq-display-name').innerText = data.name;
+                document.getElementById('sq-display-code').innerText = data.code;
+                
+                const membersList = document.getElementById('sq-members-list');
+                membersList.innerHTML = "";
+                data.memberIds.forEach(async (mid) => {
+                    const mSnap = await getDoc(doc(db, "users", mid));
+                    if(mSnap.exists()) {
+                        const mData = mSnap.data();
+                        membersList.innerHTML += `<span class="bg-slate-100 px-3 py-1 rounded-full text-[10px] font-bold text-slate-600 uppercase border border-slate-200">${mData.name}</span>`;
+                    }
+                });
+            }
         }
     </script>
 
@@ -335,10 +521,7 @@
         ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
         #toast { pointer-events: none; transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); opacity: 0; }
         
-        /* WAR ROOM RADAR ANIMATION */
-        .radar-active {
-            position: relative;
-        }
+        .radar-active { position: relative; }
         .radar-active::before {
             content: '';
             position: absolute;
@@ -378,6 +561,7 @@
                 <button id="btn-war" onclick="switchTab('war')" class="px-6 py-2 rounded-lg text-slate-500 transition-all">War Room</button>
                 <button id="btn-paid" onclick="switchTab('paid')" class="px-6 py-2 rounded-lg text-slate-500 transition-all">Arsenal</button>
             </div>
+            <button id="btn-profile" onclick="switchTab('profile')" class="text-xs font-bold text-slate-500 hover:text-orange-600 uppercase tracking-widest transition">Profile</button>
         </div>
         <div class="flex items-center gap-6">
             <div id="timer-display" class="font-mono font-black text-xl text-slate-900">00:00:00</div>
@@ -399,6 +583,83 @@
                     <span id="bc-subject-wrap" class="hidden"> / <span class="breadcrumb text-slate-600" id="bc-subject"></span></span>
                 </div>
                 <button onclick="toggleMode()" id="mode-indicator" class="text-orange-600 font-black hover:underline cursor-pointer">Continuous Mode</button>
+            </div>
+
+            <div id="view-profile" class="hidden flex-1 overflow-y-auto p-10 bg-slate-50">
+                <div class="max-w-4xl mx-auto space-y-6">
+                    <div class="flex items-center gap-8 bg-white p-8 rounded-3xl shadow-sm border border-slate-100">
+                        <div class="w-24 h-24 bg-orange-100 rounded-full flex items-center justify-center text-4xl border-4 border-white shadow-lg">🎖️</div>
+                        <div class="flex-1">
+                            <h2 id="pf-name" class="text-3xl font-black uppercase text-slate-900 tracking-tighter">Cadet</h2>
+                            <p id="pf-rank" class="text-orange-600 font-bold text-xs tracking-[0.2em] uppercase mt-1">Rank: Loading...</p>
+                            <p id="pf-streak" class="text-slate-400 font-black text-[10px] uppercase mt-1 italic tracking-widest">0 Day Streak</p>
+                        </div>
+                        <div class="text-right">
+                             <p class="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Service ID</p>
+                             <p id="pf-email" class="font-mono font-bold text-xs">...</p>
+                        </div>
+                    </div>
+
+                    <div id="squad-card" class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+                        <h3 class="text-[10px] font-bold text-orange-500 uppercase tracking-widest mb-4">Squad Tactics</h3>
+                        
+                        <div id="squad-setup-area" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            <div class="space-y-3">
+                                <label class="text-[10px] font-black uppercase text-slate-400">Create New Squad</label>
+                                <div class="flex gap-2">
+                                    <input id="sq-name-input" type="text" placeholder="Squad Name" class="flex-1 p-3 bg-slate-50 border rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-orange-500">
+                                    <button onclick="createSquad()" class="bg-orange-600 text-white px-4 py-3 rounded-xl font-bold text-[10px] uppercase">Form</button>
+                                </div>
+                            </div>
+                            <div class="space-y-3">
+                                <label class="text-[10px] font-black uppercase text-slate-400">Join via Invite Code</label>
+                                <div class="flex gap-2">
+                                    <input id="sq-join-input" type="text" placeholder="Enter Code" class="flex-1 p-3 bg-slate-50 border rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-orange-500">
+                                    <button onclick="joinSquad()" class="bg-slate-900 text-white px-4 py-3 rounded-xl font-bold text-[10px] uppercase">Join</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="squad-active-area" class="hidden">
+                            <div class="flex justify-between items-start mb-4">
+                                <div>
+                                    <p id="sq-display-name" class="text-xl font-black text-slate-900 italic uppercase">Squad Delta</p>
+                                    <p class="text-[10px] text-slate-400 font-bold uppercase">Active Duty</p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-[10px] text-orange-500 font-black uppercase tracking-widest">Invite Code</p>
+                                    <p id="sq-display-code" class="font-mono font-black text-lg">XXXXXX</p>
+                                </div>
+                            </div>
+                            <div class="border-t pt-4">
+                                <p class="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2">Deployed Personnel</p>
+                                <div id="sq-members-list" class="flex flex-wrap gap-2"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
+                        <h3 class="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4">Mission Configuration</h3>
+                        <div class="flex items-end gap-4">
+                            <div class="flex-1">
+                                <label class="text-xs font-bold text-slate-700 block mb-2 uppercase">Daily Study Target (Hours)</label>
+                                <input id="goal-input" type="number" min="1" max="24" class="w-full p-3 bg-slate-50 border rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-orange-500" placeholder="6">
+                            </div>
+                            <button onclick="saveDailyGoal()" class="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold text-xs uppercase hover:bg-orange-600 transition shadow-lg">Update Target</button>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div class="bg-white p-6 rounded-2xl border border-slate-100">
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Enlistment Date</p>
+                            <p id="pf-joined" class="text-xl font-black text-slate-800 mt-1">...</p>
+                        </div>
+                        <div class="bg-white p-6 rounded-2xl border border-slate-100">
+                            <p class="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Clearance Status</p>
+                            <p id="pf-status" class="text-xl font-black text-slate-800 mt-1">STANDARD</p>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div id="view-war" class="hidden flex-1 overflow-hidden flex flex-col lg:flex-row bg-slate-950">
@@ -444,8 +705,12 @@
                 </div>
 
                 <div class="w-full lg:w-80 bg-slate-900 border-l border-slate-800 p-6 overflow-y-auto">
-                    <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-6">Squad Status (Active)</h3>
-                    <div id="war-squad-list" class="space-y-3 opacity-80"></div>
+                    <div class="mb-6 flex justify-between items-center">
+                        <h3 class="text-[10px] font-black text-slate-500 uppercase tracking-widest">Squad Presence</h3>
+                        <span id="squad-momentum" class="text-[8px] font-black bg-orange-600 text-white px-2 py-1 rounded">0H IMPACT</span>
+                    </div>
+                    <div id="war-squad-list" class="space-y-3">
+                        </div>
                 </div>
             </div>
 
@@ -512,10 +777,24 @@
                         </section>
                     </div>
 
-                    <div id="content-paid" class="hidden flex flex-col items-center justify-center py-20 text-center">
+                    <div id="content-paid" class="hidden flex flex-col items-center justify-center py-10 text-center">
                         <h2 class="text-2xl font-black italic tracking-tighter text-slate-900 uppercase">Elite Arsenal</h2>
-                        <p id="premium-msg" class="text-sm text-slate-500 max-w-sm mt-2 mb-8">Premium NCERT Highlights are under construction.</p>
-                        <button id="premium-btn" class="bg-slate-200 text-slate-400 cursor-not-allowed px-10 py-4 rounded-2xl font-black uppercase text-xs tracking-widest">Locked</button>
+                        <p id="premium-msg" class="text-sm text-slate-500 max-w-sm mt-2 mb-8">Premium NCERT Highlights & Advanced Drills.</p>
+                        
+                        <button id="premium-btn" class="bg-slate-200 text-slate-400 cursor-not-allowed px-10 py-4 rounded-2xl font-black uppercase text-xs tracking-widest mb-6">Locked</button>
+
+                        <div id="payment-form-container" class="bg-white p-6 rounded-2xl shadow-lg border border-slate-100 max-w-sm w-full">
+                            <h3 class="text-xs font-black uppercase text-orange-600 tracking-widest mb-4">Manual Payment Gateway</h3>
+                            <p class="text-[10px] text-slate-500 mb-4">Scan QR or Pay to UPI. Submit Transaction ID below.</p>
+                            
+                            <div class="w-32 h-32 bg-slate-100 mx-auto mb-4 flex items-center justify-center rounded-lg border-2 border-dashed border-slate-300">
+                                <span class="text-[9px] font-bold text-slate-400">QR CODE HERE</span>
+                            </div>
+                            <p class="text-xs font-bold bg-slate-100 p-2 rounded mb-4">UPI: huntersquadron@upi</p>
+
+                            <input id="tid-input" type="text" placeholder="Enter Transaction ID / UTR" class="w-full p-3 bg-slate-50 border rounded-xl text-xs outline-none focus:border-orange-500 mb-3">
+                            <button onclick="submitPayment()" class="w-full bg-slate-900 text-white py-3 rounded-xl font-bold text-xs uppercase hover:bg-orange-600 transition">Verify Payment</button>
+                        </div>
                     </div>
                 </div>
 
@@ -593,18 +872,22 @@
         let currentLevel = 0, activeExam = "";
 
         window.switchTab = (type) => {
-            document.getElementById('view-content').classList.toggle('hidden', type === 'war');
+            document.getElementById('view-content').classList.toggle('hidden', type === 'war' || type === 'profile');
             document.getElementById('view-war').classList.toggle('hidden', type !== 'war');
+            document.getElementById('view-profile').classList.toggle('hidden', type !== 'profile'); 
             document.getElementById('main-sidebar').classList.toggle('hidden', type === 'war');
             
-            document.getElementById('content-free').classList.toggle('hidden', type !== 'free');
-            document.getElementById('content-paid').classList.toggle('hidden', type !== 'paid');
+            if (type === 'free' || type === 'paid') {
+                document.getElementById('view-content').classList.remove('hidden'); 
+                document.getElementById('content-free').classList.toggle('hidden', type !== 'free');
+                document.getElementById('content-paid').classList.toggle('hidden', type !== 'paid');
+            }
             
             document.getElementById('btn-free').classList.toggle('tab-active', type === 'free');
             document.getElementById('btn-war').classList.toggle('tab-active', type === 'war');
             document.getElementById('btn-paid').classList.toggle('tab-active', type === 'paid');
+            document.getElementById('btn-profile').classList.toggle('text-orange-600', type === 'profile');
             
-            // UI Adjustment for War Room
             const floatBtn = document.getElementById('timerBtn');
             if(type === 'war') {
                 floatBtn.innerHTML = `<span id="timer-dot" class="w-2 h-2 bg-orange-500 rounded-full"></span> Return to Vault`;
@@ -616,6 +899,7 @@
 
             if(type === 'free') goHome();
             else if(type === 'paid' && window.isPremiumUser) unlockPremiumUI();
+            if(type === 'profile' && auth.currentUser) loadProfileData(auth.currentUser);
         }
 
         window.drillDown = (key) => {
