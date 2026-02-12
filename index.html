@@ -75,6 +75,8 @@
             }
         };
 
+
+
         window.logout = () => {
             const user = auth.currentUser;
             if(user) updateDoc(doc(db, "users", user.uid), { isOnline: false });
@@ -94,6 +96,8 @@
         });
 
         // --- DATABASE, TIMER & ANALYTICS ---
+  let currentViewDate = new Date(); // Tracks the month currently shown in the calendar
+
         let totalSec = 0, sessionSec = 0, running = false, timerInterval;
         let isPomodoro = false, pomoTime = 1500; 
         let dailyGoalHours = 6; 
@@ -107,84 +111,100 @@
         }
 
         async function setupUserSession(user) {
-            const userRef = doc(db, "users", user.uid);
-            const userSnap = await getDoc(userRef);
-            const currentDate = getSquadronDate();
+    const userRef = doc(db, "users", user.uid);
+    const userSnap = await getDoc(userRef);
+    const currentDate = getSquadronDate(); // "YYYY-MM-DD" based on 4AM rule
 
-            if (!userSnap.exists()) {
-                await setDoc(userRef, { 
-                    name: user.email.split('@')[0], 
-                    email: user.email,
-                    totalStudyTime: 0, 
-                    isPremium: false,
-                    rank: "Cadet",
-                    joinedDate: currentDate,
-                    lastStudyDate: currentDate,
-                    subjectStats: {},
-                    dailyTodos: [],
-                    dailyGoal: 6,
-                    streak: 0
-                });
-            } else {
-                const data = userSnap.data();
-                if(data.dailyGoal) dailyGoalHours = data.dailyGoal;
+    if (!userSnap.exists()) {
+        // New User Setup
+        await setDoc(userRef, { 
+            name: user.email.split('@')[0], 
+            email: user.email,
+            lifetimeSeconds: 0, // NEW: For Merit List
+            dailySeconds: 0,    // NEW: For Daily Progress Bar
+            rank: "Cadet",
+            joinedDate: currentDate,
+            lastStudyDate: currentDate,
+            subjectStats: {},
+            dailyTodos: [],
+            dailyGoal: 6,
+            streak: 0
+        });
+    } else {
+        const data = userSnap.data();
+        if(data.dailyGoal) dailyGoalHours = data.dailyGoal;
 
-                // STREAK & RESET LOGIC
-                if (data.lastStudyDate !== currentDate) {
-                    const yesterday = new Date();
-                    yesterday.setDate(yesterday.getDate() - 1);
-                    const yesterdayStr = yesterday.toISOString().split('T')[0];
-                    
-                    let newStreak = data.streak || 0;
-                    // If goal was met yesterday, keep/increment streak, else reset
-                    if (data.lastStudyDate !== yesterdayStr && data.lastStudyDate !== currentDate) {
-                        newStreak = 0; 
-                    }
-
-                    await updateDoc(userRef, {
-                        totalStudyTime: 0,
-                        lastStudyDate: currentDate,
-                        dailyTodos: [],
-                        streak: newStreak,
-                        isOnline: false
-                    });
-                    totalSec = 0;
-                } else {
-                    totalSec = data.totalStudyTime || 0;
-                }
-
-                if (data.isPremium) {
-                    window.isPremiumUser = true;
-                    unlockPremiumUI();
-                }
-
-                updateTimerDisplay();
-                updateAnalyticsDisplay(totalSec);
-                renderSubjectStats(data.subjectStats || {});
-                renderTodos(data.dailyTodos || []);
+        // --- STREAK & NEW DAY LOGIC ---
+        // Check if we need to reset the "Daily" counter
+        if (data.lastStudyDate !== currentDate) {
+            
+            // Check if they missed yesterday completely
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            // Adjust for 4AM rule if needed, simplified here:
+            const yesterdayStr = getSquadronDate(new Date(new Date().setDate(new Date().getDate() - 1))); 
+            
+            // If the last time they studied wasn't today OR yesterday, reset streak
+            if (data.lastStudyDate !== yesterdayStr && data.lastStudyDate !== currentDate) {
+                await updateDoc(userRef, { streak: 0 });
             }
+
+            // RESET DAILY SECONDS FOR NEW DAY (But keep Lifetime Seconds)
+            await updateDoc(userRef, {
+                dailySeconds: 0,
+                lastStudyDate: currentDate,
+                dailyTodos: [], // Optional: Clear todos daily
+                isOnline: true
+            });
+            
+            totalSec = 0; // Reset local daily timer
+        } else {
+            // Same day: Resume daily progress
+            totalSec = data.dailySeconds || 0;
         }
 
-        async function loadProfileData(user) {
+        // Load correct data for Merit List (Lifetime) vs Timer (Daily)
+        if (data.isPremium) {
+            window.isPremiumUser = true;
+            unlockPremiumUI();
+        }
+
+        updateTimerDisplay();
+        updateAnalyticsDisplay(totalSec); // Update progress bar
+        renderSubjectStats(data.subjectStats || {});
+        renderTodos(data.dailyTodos || []);
+        renderHeatmap(auth.currentUser?.uid);
+    }
+}
+
+
+                async function loadProfileData(user) {
             const snap = await getDoc(doc(db, "users", user.uid));
             if(snap.exists()) {
                 const data = snap.data();
-                document.getElementById('pf-name').innerText = data.name;
+                document.getElementById('pf-name').innerText = data.name || "Cadet";
                 document.getElementById('pf-rank').innerText = data.rank || "Cadet";
                 document.getElementById('pf-joined').innerText = data.joinedDate || "Unknown";
                 document.getElementById('pf-email').innerText = data.email;
                 document.getElementById('pf-status').innerText = data.isPremium ? "ELITE" : "STANDARD";
                 document.getElementById('pf-streak').innerText = `${data.streak || 0} Day Streak`;
                 document.getElementById('goal-input').value = data.dailyGoal || 6;
-                if(data.isPremium) document.getElementById('pf-status').classList.add('text-orange-600');
                 
-                // NEW: Load Squad UI in Profile
+                if(data.isPremium) {
+                    document.getElementById('pf-status').classList.add('text-orange-600');
+                    window.isPremiumUser = true;
+                }
+                
+                // Load Squad UI
                 if(data.squadId) {
                     loadSquadInfo(data.squadId);
                 } else {
                     document.getElementById('squad-setup-area').classList.remove('hidden');
                     document.getElementById('squad-active-area').classList.add('hidden');
                 }
+
+                // Trigger the heatmap
+                renderHeatmap(user.uid);
             }
         }
 
@@ -241,45 +261,58 @@
         }
 
         window.toggleTimer = async () => {
-            const btn = document.getElementById('timerBtn');
-            const warBtn = document.getElementById('warRoomBtn');
-            const dot = document.getElementById('timer-dot');
-            const missionSubject = document.getElementById('mission-select').value;
-            const user = auth.currentUser;
+    const btn = document.getElementById('timerBtn');
+    const warBtn = document.getElementById('warRoomBtn');
+    const dot = document.getElementById('timer-dot');
+    const missionSubject = document.getElementById('mission-select').value;
+    const user = auth.currentUser;
+    
+    if (!running) {
+        // --- START TIMER ---
+        running = true;
+        btn.classList.replace('bg-slate-900', 'bg-orange-600');
+        warBtn.classList.replace('bg-orange-600', 'bg-red-600');
+        warBtn.innerText = "ABORT MISSION";
+        dot.classList.add('animate-ping');
+        document.getElementById('radar').classList.add('radar-active');
+        document.getElementById('active-mission-title').innerText = missionSubject;
+        
+        if (user) await updateDoc(doc(db, "users", user.uid), { isOnline: true });
+        showToast(`Mission: ${missionSubject} Engaged`);
+        
+        timerInterval = setInterval(() => { 
+            totalSec++; 
+            sessionSec++;
             
-            if(!running) {
-                running = true;
-                sessionSec = 0;
-                btn.classList.replace('bg-slate-900', 'bg-orange-600');
-                warBtn.classList.replace('bg-orange-600', 'bg-red-600');
-                warBtn.innerText = "ABORT MISSION";
-                dot.classList.add('animate-ping');
-                document.getElementById('radar').classList.add('radar-active');
-                document.getElementById('active-mission-title').innerText = missionSubject;
-                
-                if(user) await updateDoc(doc(db, "users", user.uid), { isOnline: true });
-                showToast(`Mission: ${missionSubject} Engaged`);
-                
-                timerInterval = setInterval(() => { 
-                    totalSec++; 
-                    sessionSec++;
-                    if(isPomodoro && pomoTime > 0) pomoTime--;
-                    updateTimerDisplay(); 
-                    if (totalSec % 60 === 0) saveProgress(); 
-                }, 1000);
-            } else {
-                running = false;
-                btn.classList.replace('bg-orange-600', 'bg-slate-900');
-                warBtn.classList.replace('bg-red-600', 'bg-orange-600');
-                warBtn.innerText = "ENGAGE MISSION";
-                dot.classList.remove('animate-ping');
-                document.getElementById('radar').classList.remove('radar-active');
-                clearInterval(timerInterval);
-                if(user) await updateDoc(doc(db, "users", user.uid), { isOnline: false });
-                saveProgress();
-                showToast("Mission Paused. Data Linked to HQ.");
+            if (isPomodoro && pomoTime > 0) pomoTime--;
+            
+            // UI Updates
+            updateTimerDisplay(); 
+            
+            // Save to Firebase every 60 seconds
+            if (totalSec % 60 === 0) {
+                saveProgress(); 
             }
-        };
+        }, 1000);
+
+    } else {
+        // --- STOP TIMER ---
+        running = false;
+        clearInterval(timerInterval); // Stop the clock
+
+        btn.classList.replace('bg-orange-600', 'bg-slate-900');
+        warBtn.classList.replace('bg-red-600', 'bg-orange-600');
+        warBtn.innerText = "ENGAGE MISSION";
+        dot.classList.remove('animate-ping');
+        document.getElementById('radar').classList.remove('radar-active');
+        
+        if (user) await updateDoc(doc(db, "users", user.uid), { isOnline: false });
+        
+        // Final save for the remaining seconds
+        saveProgress();
+        showToast("Mission Paused. Data Linked to HQ.");
+    }
+};
 
         window.toggleMode = () => {
             isPomodoro = !isPomodoro;
@@ -288,49 +321,73 @@
         }
 
         async function saveProgress() {
-            const user = auth.currentUser;
-            const missionSubject = document.getElementById('mission-select').value.replace(/[:.]/g, ''); 
-            if (user) {
-                const userRef = doc(db, "users", user.uid);
-                const hrs = totalSec / 3600;
-                const newRank = getRank(hrs);
-                
-                // STREAK UPDATE: If current hours >= daily goal, mark goal met
+    const user = auth.currentUser;
+    const missionSubject = document.getElementById('mission-select').value; 
+    
+    if (user) {
+        const userRef = doc(db, "users", user.uid);
+        
+        // 1. Capture the session time and RESET it immediately
+        // This prevents the "reset jump" because we clear the plate before the lag starts
+        const timeToSync = sessionSec; 
+        sessionSec = 0; 
+
+        // 2. Prepare the update using 'increment'
+        const updateObj = { 
+            dailySeconds: increment(timeToSync), 
+            lifetimeSeconds: increment(timeToSync), 
+            lastActive: new Date()
+        };
+
+        // 3. Save subject stats
+        updateObj[`subjectStats.${missionSubject}`] = increment(timeToSync);
+        
+        try {
+            // FIRE AND FORGET: We don't need to 'await' this for the timer to feel smooth
+            updateDoc(userRef, updateObj);
+            
+            // 4. Update UI locally
+            updateAnalyticsDisplay(totalSec);
+            
+            // 5. Minimal Streak Check (Optional: Run every 5 mins instead of 60s to save power)
+            if (totalSec > 900 && totalSec % 300 === 0) {
                 const snap = await getDoc(userRef);
                 const data = snap.data();
-                let streakUpdate = data.streak || 0;
-                if(hrs >= dailyGoalHours && (data.lastStreakUpdate !== getSquadronDate())) {
-                    streakUpdate++;
-                    await updateDoc(userRef, { lastStreakUpdate: getSquadronDate(), streak: streakUpdate });
-                    showToast(`STREAK MAINTAINED: ${streakUpdate} DAYS!`, 'success');
+                if (data.lastStreakUpdate !== getSquadronDate()) {
+                    updateDoc(userRef, { streak: increment(1), lastStreakUpdate: getSquadronDate() });
                 }
-
-                const updateObj = { 
-                    totalStudyTime: totalSec,
-                    lastActive: new Date(),
-                    rank: newRank
-                };
-                updateObj[`subjectStats.${missionSubject}`] = increment(sessionSec);
-                
-                await updateDoc(userRef, updateObj);
-                sessionSec = 0; 
-                updateAnalyticsDisplay(totalSec);
-                
-                const freshSnap = await getDoc(userRef);
-                renderSubjectStats(freshSnap.data().subjectStats || {});
             }
+        } catch (error) {
+            console.error("Sync Interrupted:", error);
+            // If it fails, put the time back into the session to try again next minute
+            sessionSec += timeToSync;
         }
+    }
+}
 
-        function updateTimerDisplay() {
-            const h = Math.floor(totalSec/3600), m = Math.floor((totalSec%3600)/60), s = totalSec%60;
-            const sh = Math.floor(sessionSec/3600), sm = Math.floor((sessionSec%3600)/60), ss = sessionSec%60;
-            const timeStr = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
-            const sessionStr = `${sh.toString().padStart(2,'0')}:${sm.toString().padStart(2,'0')}:${ss.toString().padStart(2,'0')}`;
-            
-            document.getElementById('timer-display').innerText = timeStr;
-            document.getElementById('war-total-display').innerText = timeStr;
-            document.getElementById('war-session-display').innerText = sessionStr;
-        }
+
+
+                function updateTimerDisplay() {
+    const h = Math.floor(totalSec/3600), m = Math.floor((totalSec%3600)/60), s = totalSec%60;
+    const sh = Math.floor(sessionSec/3600), sm = Math.floor((sessionSec%3600)/60), ss = sessionSec%60;
+    
+    const timeStr = `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
+    const sessionStr = `${sh.toString().padStart(2,'0')}:${sm.toString().padStart(2,'0')}:${ss.toString().padStart(2,'0')}`;
+    
+    const timerEl = document.getElementById('timer-display');
+    const warTotalEl = document.getElementById('war-total-display');
+    const warSessionEl = document.getElementById('war-session-display');
+
+    if(timerEl) timerEl.innerText = timeStr;
+    if(warTotalEl) warTotalEl.innerText = timeStr;
+    if(warSessionEl) warSessionEl.innerText = sessionStr;
+
+    // This updates the YPT Calendar grid every second
+    renderHeatmap(auth.currentUser?.uid); 
+}
+
+
+
 
         function updateAnalyticsDisplay(seconds) {
             const hours = seconds / 3600;
@@ -404,33 +461,38 @@
         }
 
         function loadMeritList() {
-            const q = query(collection(db, "users"), orderBy("totalStudyTime", "desc"), limit(10));
-            onSnapshot(q, (snapshot) => {
-                const meritDiv = document.getElementById('merit-list-content');
-                meritDiv.innerHTML = "";
-                let i = 1;
-                snapshot.forEach((doc) => {
-                    const data = doc.data();
-                    const total = data.totalStudyTime || 0;
-                    const h = Math.floor(total / 3600);
-                    const m = Math.floor((total % 3600) / 60);
-                    const s = total % 60;
-                    const timeStr = `${h}h ${m}m ${s}s`;
-                    const rank = getRank(h);
-                    meritDiv.innerHTML += `
-                        <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
-                            <div class="flex flex-col">
-                                <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rank}</span>
-                                <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
-                            </div>
-                            <div class="text-right">
-                                <span class="block text-[10px] font-mono font-black text-slate-400 italic">${timeStr}</span>
-                                <span class="text-[8px] font-bold text-orange-400">🔥 ${data.streak || 0} Days</span>
-                            </div>
-                        </div>`;
-                });
-            });
-        }
+    // Sort by LIFETIME seconds
+    const q = query(collection(db, "users"), orderBy("lifetimeSeconds", "desc"), limit(10));
+    
+    onSnapshot(q, (snapshot) => {
+        const meritDiv = document.getElementById('merit-list-content');
+        meritDiv.innerHTML = "";
+        let i = 1;
+        snapshot.forEach((doc) => {
+            const data = doc.data();
+            
+            // Calc hours from Lifetime Seconds
+            const total = data.lifetimeSeconds || 0; 
+            const h = Math.floor(total / 3600);
+            
+            // Rank Calculation
+            const rankTitle = getRank(h);
+            
+            meritDiv.innerHTML += `
+                <div class="flex items-center justify-between p-3 bg-white border rounded-xl shadow-sm border-l-4 border-l-orange-500">
+                    <div class="flex flex-col">
+                        <span class="text-[8px] font-black text-orange-500 uppercase tracking-tighter">${rankTitle}</span>
+                        <span class="text-xs font-bold text-slate-600">${i++}. ${data.name}</span>
+                    </div>
+                    <div class="text-right">
+                        <span class="block text-[10px] font-mono font-black text-slate-400 italic">${h}H Total</span>
+                        <span class="text-[8px] font-bold text-orange-400">🔥 ${data.streak || 0} Days</span>
+                    </div>
+                </div>`;
+        });
+    });
+}
+
 
         window.submitPayment = async () => {
             const tid = document.getElementById('tid-input').value;
@@ -508,6 +570,104 @@
                 });
             }
         }
+
+// 1. UPDATED YPT CALENDAR (WITH MONTH TOGGLE & CLEAR NUMBERS)
+async function renderHeatmap(userUid) {
+    const container = document.getElementById('heatmap-container');
+    if(!container) return;
+    container.innerHTML = ""; 
+
+    const year = currentViewDate.getFullYear();
+    const month = currentViewDate.getMonth(); 
+    const today = new Date();
+    
+    // Update the Month Label in HTML
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const label = document.getElementById('calendar-month-label');
+    if(label) label.innerText = `${monthNames[month]} ${year}`;
+
+    // Weekday Labels
+    const days = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+    days.forEach(day => {
+        container.innerHTML += `<div class="text-[10px] font-black text-slate-400 text-center pb-2">${day}</div>`;
+    });
+
+    // Calendar Math
+    const firstDayIndex = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const startPadding = firstDayIndex === 0 ? 6 : firstDayIndex - 1; 
+
+    // Add Empty Spaces
+    for (let p = 0; p < startPadding; p++) {
+        container.innerHTML += `<div class="aspect-square"></div>`;
+    }
+
+    // Generate Squares
+    for (let d = 1; d <= daysInMonth; d++) {
+        const square = document.createElement('div');
+        // Better contrast: stronger border and white background
+        square.className = "aspect-square rounded-[4px] flex flex-col items-center justify-center transition-all border border-slate-200 relative bg-white overflow-hidden";
+        
+        const isToday = d === today.getDate() && month === today.getMonth() && year === today.getFullYear();
+        
+                if (isToday) {
+            const h = Math.floor(totalSec / 3600);
+            const m = Math.floor((totalSec % 3600) / 60);
+            
+            square.style.backgroundColor = getHeatmapColor(h);
+            square.className = "aspect-square rounded-[4px] flex flex-col items-center justify-center border-none relative overflow-hidden ring-2 ring-orange-500 ring-inset";
+            
+            square.innerHTML = `
+                <span class="text-[7px] font-black absolute top-0.5 left-1 text-white">${d}</span>
+                <span class="text-[11px] font-black text-white leading-none mt-1" style="text-shadow: 1px 1px 2px rgba(0,0,0,0.5);">${h}:${m.toString().padStart(2, '0')}</span>
+            `;
+        }
+
+        container.appendChild(square);
+    }
+}
+
+// 2. TOGGLE MONTH FUNCTION
+window.changeMonth = (offset) => {
+    currentViewDate.setMonth(currentViewDate.getMonth() + offset);
+    renderHeatmap(auth.currentUser?.uid);
+};
+
+// 3. ENHANCED COLOR LOGIC
+function getHeatmapColor(hours) {
+    if (hours <= 0) return '#f8fafc'; 
+    if (hours < 2) return '#fdba74';  // Light
+    if (hours < 5) return '#f97316';  // Solid
+    return '#c2410c';                 // Elite (Burnt Orange)
+}
+
+// 4. SITREP FUNCTION (Retained and Polished)
+window.shareProgress = () => {
+    const name = document.getElementById('pf-name').innerText;
+    const rank = document.getElementById('pf-rank').innerText;
+    const streak = document.getElementById('pf-streak').innerText;
+    const time = document.getElementById('timer-display').innerText;
+    const squadName = document.getElementById('sq-display-name')?.innerText || "Solo Operative";
+    
+    const report = `*HUNTER SQUADRON SITREP*\n` +
+                   `--------------------------\n` +
+                   `🪖 *Personnel:* ${name}\n` +
+                   `🎖️ *Rank:* ${rank}\n` +
+                   `🚀 *Squad:* ${squadName}\n` +
+                   `⏱️ *Today's Focus:* ${time}\n` +
+                   `🔥 *Streak:* ${streak}\n\n` +
+                   `_Discipline is the bridge between goals and accomplishment._`;
+
+    if (navigator.share) {
+        navigator.share({ title: 'SITREP', text: report });
+    } else {
+        navigator.clipboard.writeText(report);
+        showToast("SITREP copied to clipboard!", "success");
+    }
+};
+
+
+
     </script>
 
     <style>
@@ -599,6 +759,25 @@
                              <p id="pf-email" class="font-mono font-bold text-xs">...</p>
                         </div>
                     </div>
+
+<div class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm mb-6">
+    <div class="flex justify-between items-center mb-4">
+        <div class="flex items-center gap-3">
+            <button onclick="changeMonth(-1)" class="p-1.5 hover:bg-slate-100 rounded-md text-slate-400 transition-colors">❮</button>
+            <h3 id="calendar-month-label" class="text-[12px] font-black text-slate-900 uppercase tracking-widest italic">February 2026</h3>
+            <button onclick="changeMonth(1)" class="p-1.5 hover:bg-slate-100 rounded-md text-slate-400 transition-colors">❯</button>
+        </div>
+        <span class="text-[10px] font-black text-orange-600 bg-orange-50 px-2 py-0.5 rounded-full">SERVICE RECORD</span>
+    </div>
+    <div id="heatmap-container" class="grid grid-cols-7 gap-1.5">
+        </div>
+    </div>
+
+
+<button onclick="shareProgress()" class="w-full mb-6 bg-slate-900 text-white p-4 rounded-2xl font-black hover:bg-orange-600 transition shadow-lg uppercase text-[10px] tracking-widest flex items-center justify-center gap-3">
+    <span>📤</span> Share Situation Report (SITREP)
+</button>
+
 
                     <div id="squad-card" class="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm">
                         <h3 class="text-[10px] font-bold text-orange-500 uppercase tracking-widest mb-4">Squad Tactics</h3>
@@ -955,6 +1134,7 @@
         }
         
         window.closePDF = () => { document.getElementById('pdf-modal').classList.add('hidden'); document.getElementById('pdf-frame').src = ""; }
+
     </script>
 </body>
 </html>
